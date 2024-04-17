@@ -2,6 +2,15 @@ import streamlit as st
 from clarifai.client.model import Model
 import base64
 
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from the `.env` file
+load_dotenv()
+
+# Access the PAT using os.getenv()
+clarifai_pat = os.getenv("CLARIFAI_PAT")
+
 def main():
     st.title("Plant Doctor: Save Your Plants!")
 
@@ -26,7 +35,7 @@ def process_image_and_query(image_bytes, query):
     # Process image and query using Clarifai model
     # Initialize Clarifai model
     model_url = "https://clarifai.com/gcp/generate/models/gemini-pro-vision"
-    clarifai_model = Model(url=model_url, pat="8866ee7a609c4b2992a931c11d46ac52")
+    clarifai_model = Model(url=model_url, pat=clarifai_pat)
     
     # Construct the prompt including the instructions for the model
     prompt = "As a plant doctor, diagnose the plant issue based on the provided image and text. Provide treatment recommendations and advice for plant care."
