@@ -6,3 +6,4 @@ keybert
 Django
 gunicorn
 supabase
+python-dotenv
