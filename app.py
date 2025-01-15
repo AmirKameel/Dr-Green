@@ -405,7 +405,6 @@ def health_check():
 #similart
 
 from flask import Flask, request, jsonify
-from sentence_transformers import util
 import numpy as np
 
 
