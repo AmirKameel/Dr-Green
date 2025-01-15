@@ -1,5 +1,9 @@
+from concurrent.futures import ThreadPoolExecutor
 import json
+import math
+import time
 import traceback
+from typing import Dict, List
 from flask import Flask, request, jsonify
 import numpy as np
 from nltk.tokenize import sent_tokenize, word_tokenize
@@ -15,7 +19,7 @@ from database.manual_sections import ManualSections
 from database.compliance_reports import ComplianceReports
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
+
 # Download required NLTK data at startup
 nltk.download('punkt')
 nltk.download('averaged_perceptron_tagger')
@@ -25,56 +29,132 @@ nltk.download('stopwords')
 stop_words = set(stopwords.words('english'))
 tfidf = TfidfVectorizer(max_features=100)  # Limit features for memory efficiency
 
-# Replace the original NLP functions with lightweight versions
+
+def process_section_chunk(sections: List[Dict], regulation_id: int, chunk_size: int = 5) -> Dict:
+    """
+    Process a chunk of sections with built-in retry logic.
+    """
+    results = {
+        'successful': [],
+        'failed': []
+    }
+    
+    for i in range(0, len(sections), chunk_size):
+        chunk = sections[i:i + chunk_size]
+        
+        for section_data in chunk:
+            max_retries = 3
+            retry_count = 0
+            
+            while retry_count < max_retries:
+                try:
+                    # Extract required fields
+                    full_text = section_data.get('full_text', '')
+                    if not full_text:
+                        results['failed'].append({
+                            'section_name': section_data.get('section_name'),
+                            'error': 'No full_text provided'
+                        })
+                        break
+                        
+                    # Generate NLP features with timeout protection
+                    with ThreadPoolExecutor() as executor:
+                        future_summary = executor.submit(generate_summary, full_text)
+                        future_keywords = executor.submit(extract_keywords, full_text)
+                        future_embedding = executor.submit(generate_vector_embedding, full_text)
+                        
+                        # Set timeout for NLP processing
+                        summary = future_summary.result(timeout=30)
+                        keywords = future_keywords.result(timeout=30)
+                        vector_embedding = future_embedding.result(timeout=30)
+                    
+                    # Create section in database
+                    section = RegulationSections.create_section(
+                        regulation_id=regulation_id,
+                        section_name=section_data['section_name'],
+                        section_number=section_data.get('section_number'),
+                        full_text=full_text,
+                        summary=summary,
+                        keywords=keywords,
+                        vector_embedding=vector_embedding
+                    )
+                    
+                    results['successful'].append({
+                        'section_id': section.get('id'),
+                        'section_name': section_data.get('section_name')
+                    })
+                    break
+                    
+                except Exception as e:
+                    retry_count += 1
+                    if retry_count == max_retries:
+                        results['failed'].append({
+                            'section_name': section_data.get('section_name'),
+                            'error': str(e)
+                        })
+                    time.sleep(1)  # Wait before retry
+                    
+        # Add a small delay between chunks to prevent overwhelming the server
+        time.sleep(0.5)
+    
+    return results
+
+# Optimize the NLP functions for better performance
 def generate_summary(text: str) -> str:
-    """
-    Generate a summary using basic NLP techniques instead of deep learning.
-    """
+    """Optimized summary generation with timeout protection"""
     if not text:
         return ""
     try:
-        # Split into sentences
+        # Limit input size
+        max_length = 10000
+        if len(text) > max_length:
+            text = text[:max_length]
+            
         sentences = sent_tokenize(text)
         if len(sentences) <= 3:
             return text
 
-        # Calculate sentence scores based on word importance
+        # Use numpy for faster computation
         word_freq = Counter(word_tokenize(text.lower()))
-        scores = {}
+        scores = np.zeros(len(sentences))
         
-        for sentence in sentences:
+        for i, sentence in enumerate(sentences):
             words = word_tokenize(sentence.lower())
-            score = sum(word_freq[word] for word in words if word not in stop_words)
-            scores[sentence] = score / len(words) if words else 0
-
-        # Get top sentences
-        top_sentences = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:3]
-        summary = ' '.join(sent for sent, _ in sorted(top_sentences, key=lambda x: sentences.index(x[0])))
+            if words:
+                scores[i] = sum(word_freq[word] for word in words if word not in stop_words) / len(words)
         
+        # Get indices of top sentences
+        top_indices = np.argsort(scores)[-3:]
+        top_indices.sort()  # Keep original order
+        
+        summary = ' '.join(sentences[i] for i in top_indices)
         return summary
 
     except Exception as e:
         print(f"Error generating summary: {e}")
-        return text[:200] + "..."  # Fallback to simple truncation
+        return text[:200] + "..."
 
 def extract_keywords(text: str) -> list:
-    """
-    Extract keywords using POS tagging instead of KeyBERT.
-    """
+    """Optimized keyword extraction"""
     if not text:
         return []
     try:
-        # Tokenize and POS tag
+        # Limit input size
+        max_length = 10000
+        if len(text) > max_length:
+            text = text[:max_length]
+            
+        # More efficient tokenization
         tokens = word_tokenize(text.lower())
         tagged = pos_tag(tokens)
         
-        # Keep only nouns and adjectives
-        important_words = [word for word, tag in tagged 
-                         if tag.startswith(('NN', 'JJ')) and word not in stop_words 
-                         and len(word) > 2]
+        # Use set operations for faster filtering
+        important_words = {word for word, tag in tagged 
+                         if tag.startswith(('NN', 'JJ')) 
+                         and word not in stop_words 
+                         and len(word) > 2}
         
-        # Get most common important words
-        return [word for word, _ in Counter(important_words).most_common(5)]
+        return list(Counter(important_words).most_common(5))
 
     except Exception as e:
         print(f"Error extracting keywords: {e}")
@@ -201,61 +281,45 @@ def create_section(regulation_id):
 
 @app.route('/regulations/<int:regulation_id>/sections', methods=['POST'])
 def create_sections(regulation_id):
-    """Create one or multiple regulation sections with NLP processing"""
+    """Create multiple regulation sections with chunked processing and progress tracking"""
     try:
         data = request.get_json()
         
         # Check if data is a list or single object
         if not isinstance(data, list):
             data = [data]
-        
-        created_sections = []
-        
-        for section_data in data:
-            try:
-                # Log individual section data
-                print(f"Processing section: {section_data.get('section_name')}")
-                
-                # Extract required fields
-                full_text = section_data.get('full_text', '')
-                if not full_text:
-                    print(f"Skipping section {section_data.get('section_name')}: no full_text provided")
-                    continue
-                    
-                # Generate NLP features
-                summary = generate_summary(full_text)
-                keywords = extract_keywords(full_text)
-                vector_embedding = generate_vector_embedding(full_text)
-                
-                # Create section in database
-                section = RegulationSections.create_section(
-                    regulation_id=regulation_id,
-                    section_name=section_data['section_name'],
-                    section_number=section_data.get('section_number'),
-                    full_text=full_text,
-                    summary=summary,
-                    keywords=keywords,
-                    vector_embedding=vector_embedding
-                )
-                
-                created_sections.append(section)
-                print(f"Successfully created section: {section_data.get('section_name')}")
-                
-            except Exception as e:
-                print(f"Error processing section {section_data.get('section_name', 'unknown')}: {str(e)}")
-                continue
-        
-        if not created_sections:
-            return jsonify({'error': 'No sections were created successfully'}), 400
             
-        return jsonify({
-            'message': f'Successfully created {len(created_sections)} sections',
-            'sections': created_sections
-        }), 201
+        if not data:
+            return jsonify({'error': 'No sections provided'}), 400
+            
+        # Calculate optimal chunk size based on data length
+        total_sections = len(data)
+        chunk_size = min(5, math.ceil(total_sections / 10))  # Adjust chunk size based on total
         
+        # Process sections in chunks
+        results = process_section_chunk(data, regulation_id, chunk_size)
+        
+        # Prepare response
+        response = {
+            'message': f'Processed {len(results["successful"])} out of {total_sections} sections',
+            'successful_sections': len(results['successful']),
+            'failed_sections': len(results['failed']),
+            'successful': results['successful'],
+            'failed': results['failed']
+        }
+        
+        # Determine appropriate status code
+        if len(results['successful']) == 0:
+            return jsonify(response), 400
+        elif len(results['failed']) > 0:
+            return jsonify(response), 207  # Partial Content
+        else:
+            return jsonify(response), 201
+            
     except Exception as e:
-        print(f"Batch section creation error: {str(e)}\n{traceback.format_exc()}")
+        print(f"Batch section creation error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
 
 
 @app.route('/regulations/<int:regulation_id>/sections/<int:section_id>', methods=['PUT'])
@@ -403,8 +467,7 @@ def health_check():
 
 #similart
 
-from flask import Flask, request, jsonify
-import numpy as np
+
 
 
 
