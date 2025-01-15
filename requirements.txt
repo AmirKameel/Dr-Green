@@ -1,4 +1,5 @@
 Flask
+django
 gunicorn
 supabase
 python-dotenv
