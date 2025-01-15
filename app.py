@@ -2,65 +2,113 @@ import json
 import traceback
 from django import db
 from flask import Flask, request, jsonify
-import torch
+import numpy as np
+from nltk.tokenize import sent_tokenize, word_tokenize
+from nltk.corpus import stopwords
+from nltk.tag import pos_tag
+from sklearn.feature_extraction.text import TfidfVectorizer
+import nltk
+from collections import Counter
 from database.regulations import Regulations
 from database.regulation_sections import RegulationSections
 from database.manuals import Manuals
 from database.manual_sections import ManualSections
 from database.compliance_reports import ComplianceReports
-from transformers import pipeline  # For summarization
-from sentence_transformers import SentenceTransformer  # For embeddings
-from keybert import KeyBERT  # For keyword extraction
 
 app = Flask(__name__)
 
-# Initialize lightweight models
-summarizer = pipeline("summarization", model="t5-small")  # Smaller summarization model
-# Initialize the SentenceTransformer model
-model = SentenceTransformer('paraphrase-MiniLM-L6-v2')  # Smaller embedding model
-kw_model = KeyBERT(model=model)  # Use the same model for keyword extraction
+# Download required NLTK data at startup
+nltk.download('punkt')
+nltk.download('averaged_perceptron_tagger')
+nltk.download('stopwords')
 
+# Initialize global variables
+stop_words = set(stopwords.words('english'))
+tfidf = TfidfVectorizer(max_features=100)  # Limit features for memory efficiency
 
-
-# Helper functions
+# Replace the original NLP functions with lightweight versions
 def generate_summary(text: str) -> str:
     """
-    Generate a summary of the input text using a lightweight model.
+    Generate a summary using basic NLP techniques instead of deep learning.
     """
     if not text:
         return ""
     try:
-        summary = summarizer(text, max_length=50, min_length=25, do_sample=False)[0]['summary_text']
+        # Split into sentences
+        sentences = sent_tokenize(text)
+        if len(sentences) <= 3:
+            return text
+
+        # Calculate sentence scores based on word importance
+        word_freq = Counter(word_tokenize(text.lower()))
+        scores = {}
+        
+        for sentence in sentences:
+            words = word_tokenize(sentence.lower())
+            score = sum(word_freq[word] for word in words if word not in stop_words)
+            scores[sentence] = score / len(words) if words else 0
+
+        # Get top sentences
+        top_sentences = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:3]
+        summary = ' '.join(sent for sent, _ in sorted(top_sentences, key=lambda x: sentences.index(x[0])))
+        
         return summary
+
     except Exception as e:
         print(f"Error generating summary: {e}")
-        return ""
+        return text[:200] + "..."  # Fallback to simple truncation
 
 def extract_keywords(text: str) -> list:
     """
-    Extract keywords from the input text using a lightweight model.
+    Extract keywords using POS tagging instead of KeyBERT.
     """
     if not text:
         return []
     try:
-        keywords = kw_model.extract_keywords(text, keyphrase_ngram_range=(1, 1), stop_words='english', top_n=5)
-        return [kw[0] for kw in keywords]  # Return only the keywords, not their scores
+        # Tokenize and POS tag
+        tokens = word_tokenize(text.lower())
+        tagged = pos_tag(tokens)
+        
+        # Keep only nouns and adjectives
+        important_words = [word for word, tag in tagged 
+                         if tag.startswith(('NN', 'JJ')) and word not in stop_words 
+                         and len(word) > 2]
+        
+        # Get most common important words
+        return [word for word, _ in Counter(important_words).most_common(5)]
+
     except Exception as e:
         print(f"Error extracting keywords: {e}")
         return []
 
 def generate_vector_embedding(text: str) -> list:
     """
-    Generate a vector embedding for the input text using a lightweight model.
+    Generate document embedding using TF-IDF with matching dimensions.
     """
+    vector_size = 384  # Match the existing embedding size
     if not text:
-        return []
+        return [0] * vector_size
     try:
-        embedding = model.encode(text)
-        return embedding.tolist()  # Convert numpy array to list of floats
+        # Initialize TF-IDF with matching dimensions
+        tfidf = TfidfVectorizer(max_features=vector_size)
+        
+        # Create a small corpus with the text to ensure proper vectorization
+        corpus = [text]
+        
+        # Fit and transform the text
+        sparse_vector = tfidf.fit_transform(corpus)
+        
+        # Convert to dense array and ensure fixed size
+        dense_vector = sparse_vector.toarray()[0]
+        
+        # Pad or truncate to match exact size
+        if len(dense_vector) < vector_size:
+            return np.pad(dense_vector, (0, vector_size - len(dense_vector))).tolist()
+        return dense_vector[:vector_size].tolist()
+
     except Exception as e:
-        print(f"Error generating vector embedding: {e}")
-        return []
+        print(f"Error generating embedding: {e}")
+        return [0] * vector_size
 
 # Regulations Endpoints
 @app.route('/regulations', methods=['GET'])
@@ -110,7 +158,7 @@ def get_section(section_id):
         return jsonify({"error": "Section not found"}), 404
     return jsonify(section), 200
 
-@app.route('/regulations/<int:regulation_id>/sections', methods=['POST'])
+@app.route('/regulations/<int:regulation_id>/section', methods=['POST'])
 def create_section(regulation_id):
     """Create a new regulation section with NLP processing"""
     try:
@@ -150,6 +198,66 @@ def create_section(regulation_id):
     except Exception as e:
         print(f"Section creation error: {str(e)}\n{traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/regulations/<int:regulation_id>/sections', methods=['POST'])
+def create_sections(regulation_id):
+    """Create one or multiple regulation sections with NLP processing"""
+    try:
+        data = request.get_json()
+        
+        # Check if data is a list or single object
+        if not isinstance(data, list):
+            data = [data]
+        
+        created_sections = []
+        
+        for section_data in data:
+            try:
+                # Log individual section data
+                print(f"Processing section: {section_data.get('section_name')}")
+                
+                # Extract required fields
+                full_text = section_data.get('full_text', '')
+                if not full_text:
+                    print(f"Skipping section {section_data.get('section_name')}: no full_text provided")
+                    continue
+                    
+                # Generate NLP features
+                summary = generate_summary(full_text)
+                keywords = extract_keywords(full_text)
+                vector_embedding = generate_vector_embedding(full_text)
+                
+                # Create section in database
+                section = RegulationSections.create_section(
+                    regulation_id=regulation_id,
+                    section_name=section_data['section_name'],
+                    section_number=section_data.get('section_number'),
+                    full_text=full_text,
+                    summary=summary,
+                    keywords=keywords,
+                    vector_embedding=vector_embedding
+                )
+                
+                created_sections.append(section)
+                print(f"Successfully created section: {section_data.get('section_name')}")
+                
+            except Exception as e:
+                print(f"Error processing section {section_data.get('section_name', 'unknown')}: {str(e)}")
+                continue
+        
+        if not created_sections:
+            return jsonify({'error': 'No sections were created successfully'}), 400
+            
+        return jsonify({
+            'message': f'Successfully created {len(created_sections)} sections',
+            'sections': created_sections
+        }), 201
+        
+    except Exception as e:
+        print(f"Batch section creation error: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/regulations/<int:regulation_id>/sections/<int:section_id>', methods=['PUT'])
 def update_section_with_regulation(regulation_id, section_id):
@@ -303,9 +411,8 @@ import numpy as np
 
 
 def calculate_similarity(section_data, profile_data):
-    """Calculate similarity between section and profile with improved logic"""
+    """Calculate similarity between section and profile with fixed dimensions"""
     try:
-        # Initialize scores
         scores = {
             'total_score': 0.0,
             'keyword_score': 0.0,
@@ -320,77 +427,64 @@ def calculate_similarity(section_data, profile_data):
         if profile_data.get('type_of_operation'):
             profile_parts.append(f"Operation type: {profile_data['type_of_operation']}")
 
-        # Add OPS SPECS
         ops_specs = profile_data.get('ops_specs', {})
         if ops_specs:
             enabled_specs = [f"{k}: {v}" for k, v in ops_specs.items()]
             profile_parts.extend(enabled_specs)
 
         profile_text = ' '.join(profile_parts)
-        print(f"Profile text: {profile_text}")  # Debugging
-
-        # Extract keywords from profile text
-        profile_keywords = set(extract_keywords(profile_text))
-        section_keywords = set(section_data.get('keywords', []))
-        print(f"Profile keywords: {profile_keywords}")  # Debugging
-        print(f"Section keywords: {section_keywords}")  # Debugging
 
         # Calculate keyword similarity
+        profile_keywords = set(extract_keywords(profile_text))
+        section_keywords = set(section_data.get('keywords', []))
+        
         if section_keywords and profile_keywords:
             matching_keywords = section_keywords.intersection(profile_keywords)
             scores['keyword_score'] = len(matching_keywords) / max(len(section_keywords), 1)
             scores['profile_matches'] = list(matching_keywords)
-            print(f"Matching keywords: {matching_keywords}")  # Debugging
-            print(f"Keyword score: {scores['keyword_score']}")  # Debugging
 
-        # Fetch vector embedding from the database
-        section_embedding = section_data.get('vector_embedding')
+        # Calculate text similarity using fixed-dimension vectors
+        section_embedding = section_data.get('vector_embedding', [])
+        if isinstance(section_embedding, str):
+            try:
+                section_embedding = eval(section_embedding)
+            except:
+                section_embedding = []
+
         if section_embedding:
-            print(f"Section embedding (before conversion): {section_embedding}")  # Debugging
-            # Convert embedding to list of floats if it's a string
-            if isinstance(section_embedding, str):
-                try:
-                    section_embedding = json.loads(section_embedding)  # Convert string to list
-                except json.JSONDecodeError:
-                    print("Error: Invalid JSON format for section embedding.")
-                    section_embedding = []
-            print(f"Section embedding (after conversion): {section_embedding}")  # Debugging
-
-            # Generate embedding for the profile text
             profile_embedding = generate_vector_embedding(profile_text)
-            if profile_embedding:
-                print(f"Profile embedding: {profile_embedding}")  # Debugging
-                # Convert embeddings to numerical tensors
-                section_embedding_tensor = torch.tensor(section_embedding, dtype=torch.float32).unsqueeze(0)
-                profile_embedding_tensor = torch.tensor(profile_embedding, dtype=torch.float32).unsqueeze(0)
+            
+            # Ensure both embeddings have the same dimension
+            if len(section_embedding) != len(profile_embedding):
+                print(f"Warning: Embedding dimension mismatch. Section: {len(section_embedding)}, Profile: {len(profile_embedding)}")
+                # Pad the shorter embedding if necessary
+                max_dim = max(len(section_embedding), len(profile_embedding))
+                section_embedding = np.pad(section_embedding, (0, max_dim - len(section_embedding)))
+                profile_embedding = np.pad(profile_embedding, (0, max_dim - len(profile_embedding)))
+            
+            # Calculate cosine similarity
+            dot_product = np.dot(section_embedding, profile_embedding)
+            norm_product = (np.linalg.norm(section_embedding) * 
+                          np.linalg.norm(profile_embedding))
+            
+            if norm_product != 0:
+                scores['text_similarity_score'] = float(dot_product / norm_product)
 
-                # Calculate cosine similarity
-                similarity = util.cos_sim(section_embedding_tensor, profile_embedding_tensor)
-                scores['text_similarity_score'] = float(similarity[0][0])
-                print(f"Text similarity score: {scores['text_similarity_score']}")  # Debugging
+        # Calculate total score
+        scores['total_score'] = (scores['keyword_score'] * 0.5 + 
+                               scores['text_similarity_score'] * 0.5)
 
-        # Calculate total score with dynamic weighting
-        if scores['keyword_score'] > 0 and scores['text_similarity_score'] > 0:
-            # If both scores are positive, use weighted sum
-            scores['total_score'] = (
-                scores['keyword_score'] * 0.5 +
-                scores['text_similarity_score'] * 0.5
-            )
-        else:
-            # If one score is zero, prioritize the other
-            scores['total_score'] = max(scores['keyword_score'], scores['text_similarity_score'])
-
-        print(f"Total score: {scores['total_score']}")  # Debugging
         return scores
 
     except Exception as e:
-        print(f"Similarity calculation error: {str(e)}\n{traceback.format_exc()}")
+        print(f"Similarity calculation error: {str(e)}")
         return {
             'total_score': 0.0,
             'keyword_score': 0.0,
             'text_similarity_score': 0.0,
             'profile_matches': []
         }
+
     
 
 @app.route('/analyze-regulation-similarity/<int:regulation_id>', methods=['POST'])
