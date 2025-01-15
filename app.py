@@ -15,7 +15,7 @@ from database.manual_sections import ManualSections
 from database.compliance_reports import ComplianceReports
 
 app = Flask(__name__)
-
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 # Download required NLTK data at startup
 nltk.download('punkt')
 nltk.download('averaged_perceptron_tagger')
