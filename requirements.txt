@@ -1,8 +1,7 @@
 Flask
-django
 gunicorn
 supabase
 python-dotenv
 nltk
 scikit-learn
-sentence_transformers
+numpy
