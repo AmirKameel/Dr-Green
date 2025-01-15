@@ -1,5 +1,6 @@
 Flask
-Django
 gunicorn
 supabase
 python-dotenv
+nltk
+scikit-learn
