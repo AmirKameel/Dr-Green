@@ -1,8 +1,4 @@
 Flask
-torch
-transformers
-sentence-transformers
-keybert
 Django
 gunicorn
 supabase
