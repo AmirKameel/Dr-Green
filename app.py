@@ -1,6 +1,5 @@
 import json
 import traceback
-from django import db
 from flask import Flask, request, jsonify
 import numpy as np
 from nltk.tokenize import sent_tokenize, word_tokenize
