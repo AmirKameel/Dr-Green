@@ -40,6 +40,54 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 app.config['AEROSYNC_API_KEY'] = os.getenv('AEROSYNC_API_KEY')  
 
 
+# Create data directory if it doesn't exist
+nltk_data_dir = os.path.join(os.getcwd(), 'nltk_data')
+if not os.path.exists(nltk_data_dir):
+    os.makedirs(nltk_data_dir)
+
+# Set NLTK data path
+nltk.data.path.append(nltk_data_dir)
+
+def download_nltk_data():
+    """Download required NLTK data with error handling and SSL workaround"""
+    try:
+        # Handle SSL certificate verification issues
+        try:
+            _create_unverified_https_context = ssl._create_unverified_context
+        except AttributeError:
+            pass
+        else:
+            ssl._create_default_https_context = _create_unverified_https_context
+
+        # Download required NLTK data
+        required_packages = ['punkt', 'averaged_perceptron_tagger', 'stopwords']
+        for package in required_packages:
+            try:
+                nltk.download(package, download_dir=nltk_data_dir, quiet=True)
+            except Exception as e:
+                print(f"Error downloading {package}: {str(e)}")
+
+    except Exception as e:
+        print(f"Error setting up NLTK: {str(e)}")
+
+# Initialize stopwords with fallback
+try:
+    stop_words = set(stopwords.words('english'))
+except Exception:
+    # Fallback stopwords if NLTK download fails
+    stop_words = set(['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', 
+                     'your', 'yours', 'yourself', 'yourselves', 'he', 'him', 'his', 'himself',
+                     'she', 'her', 'hers', 'herself', 'it', 'its', 'itself', 'they', 'them',
+                     'their', 'theirs', 'themselves', 'what', 'which', 'who', 'whom', 'this',
+                     'that', 'these', 'those', 'am', 'is', 'are', 'was', 'were', 'be', 'been',
+                     'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing',
+                     'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because', 'as', 'until',
+                     'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against', 'between',
+                     'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to',
+                     'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 'under', 'again',
+                     'further', 'then', 'once'])
+
+
 class BatchProcessor:
     def __init__(self, chunk_size=10, max_retries=3, timeout=120):
         self.chunk_size = chunk_size
