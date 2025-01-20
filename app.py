@@ -60,7 +60,7 @@ def download_nltk_data():
             ssl._create_default_https_context = _create_unverified_https_context
 
         # Download required NLTK data
-        required_packages = ['punkt', 'averaged_perceptron_tagger', 'stopwords']
+        required_packages = ['punkt', 'averaged_perceptron_tagger']
         for package in required_packages:
             try:
                 nltk.download(package, download_dir=nltk_data_dir, quiet=True)
