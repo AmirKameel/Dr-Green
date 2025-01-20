@@ -5,3 +5,9 @@ python-dotenv
 nltk
 scikit-learn
 numpy
+flask
+PyMuPDF
+openai
+python-multipart
+werkzeug
+toml
