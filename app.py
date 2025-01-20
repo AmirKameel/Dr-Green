@@ -1476,13 +1476,6 @@ def extract_section():
 
 
 
-@app.route('/health', methods=['GET'])
-@require_api_key
-def health_check():
-    """
-    Health check endpoint
-    """
-    return jsonify({"status": "healthy"}), 200
 
 # Error Handlers
 @app.errorhandler(413)
