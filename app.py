@@ -1013,6 +1013,19 @@ class PDFProcessor:
             if 'doc' in locals():
                 doc.close()
 
+    def process_sections(self, sections: List[Dict], regulation_id: int) -> Dict:
+        """
+        Process sections in batches with parallel processing
+        """
+        self.total_sections = len(sections)
+        self.processed_count = 0
+        results = {
+            'successful': [],
+            'failed': [],
+            'total_processed': 0
+        }
+
+    
     def _process_batch(self, batch: List[Dict], regulation_id: int) -> Dict:
         """
         Process a batch of sections with improved error handling
