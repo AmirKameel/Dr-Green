@@ -1,3 +1,4 @@
+from typing import Dict
 from utils.supabase_client import supabase
 
 class RegulationSections:
@@ -62,21 +63,6 @@ class RegulationSections:
         return response.data[0] if response.data else None
 
     @staticmethod
-    def update_section(section_id: int, updates: dict):
-        """
-        Update a section.
-        
-        Args:
-            section_id (int): ID of the section.
-            updates (dict): Fields to update.
-        
-        Returns:
-            dict: The updated section record.
-        """
-        response = supabase.table("regulation_sections").update(updates).eq("section_id", section_id).execute()
-        return response.data[0] if response.data else None
-
-    @staticmethod
     def delete_section(section_id: int):
         """
         Delete a section.
@@ -101,3 +87,45 @@ class RegulationSections:
         except Exception as e:
             print(f"Error fetching sections: {e}")
             return []  # Return an empty list in case of an error
+        
+    @staticmethod
+    def find_section_by_name(regulation_id: int, section_name: str) -> Dict:
+        """
+        Find a section by regulation_id and section_name
+        """
+        try:
+            # Assuming you have a supabase client instance
+            response = supabase.table('regulation_sections')\
+                .select('*')\
+                .eq('regulation_id', regulation_id)\
+                .eq('section_name', section_name)\
+                .execute()
+            
+            if response.data and len(response.data) > 0:
+                return response.data[0]
+            return None
+
+        except Exception as e:
+            print(f"Error finding section: {str(e)}")
+            return None
+
+    @staticmethod
+    def update_section(section_id: int, data: Dict) -> Dict:
+        """
+        Update an existing section
+        """
+        try:
+            response = supabase.table('regulation_sections')\
+                .update(data)\
+                .eq('id', section_id)\
+                .execute()
+            
+            if response.data and len(response.data) > 0:
+                return response.data[0]
+            raise Exception("Failed to update section")
+
+        except Exception as e:
+            print(f"Error updating section: {str(e)}")
+            raise
+
+   
