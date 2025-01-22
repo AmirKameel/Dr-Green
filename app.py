@@ -926,21 +926,23 @@ class FlexibleAuditProcessor:
 
 
 class PDFProcessor:
-    def __init__(self, chunk_size=10, max_workers=4):
+    def __init__(self, chunk_size=5, max_workers=4, timeout=300):
         self.chunk_size = chunk_size
         self.max_workers = max_workers
+        self.timeout = timeout
         self.processed_count = 0
         self.total_sections = 0
         self._lock = threading.Lock()
 
     def extract_sections(self, pdf_path: str, expand_pages: int = 7) -> List[Dict]:
         """
-        Extract sections from PDF and format them for database storage
+        Extract sections from PDF with improved duplicate handling
         """
         try:
             doc = fitz.open(pdf_path)
             toc = doc.get_toc()
             sections = []
+            seen_sections = {}  # Track sections we've seen
 
             # Process TOC entries
             for level, title, page in toc:
@@ -952,14 +954,23 @@ class PDFProcessor:
                             page_text = doc.load_page(i).get_text("blocks")
                         section_text += page_text if page_text else ""
 
+                    # Handle duplicate sections by appending a counter
+                    base_title = title
+                    if base_title in seen_sections:
+                        seen_sections[base_title] += 1
+                        title = f"{base_title} ({seen_sections[base_title]})"
+                    else:
+                        seen_sections[base_title] = 1
+
                     sections.append({
                         "section_name": title,
                         "section_number": str(level),
-                        "full_text": section_text.strip()
+                        "full_text": section_text.strip(),
+                        "page": page
                     })
 
                 except Exception as e:
-                    print(f"Error processing section {title}: {str(e)}")
+                    print(f"Error processing TOC section {title}: {str(e)}")
 
             # Find additional sections using regex patterns
             pattern = r'\b(ORG \d+(\.\d+){1,5})\b'
@@ -971,6 +982,14 @@ class PDFProcessor:
                     section_text = ""
                     header_title = header[0]
                     
+                    # Handle duplicate ORG sections
+                    base_title = header_title
+                    if base_title in seen_sections:
+                        seen_sections[base_title] += 1
+                        header_title = f"{base_title} ({seen_sections[base_title]})"
+                    else:
+                        seen_sections[base_title] = 1
+
                     # Extract text for found section
                     for i in range(page_num, min(page_num + expand_pages + 1, len(doc))):
                         page_text = doc.load_page(i).get_text("text")
@@ -981,7 +1000,8 @@ class PDFProcessor:
                     sections.append({
                         "section_name": header_title,
                         "section_number": str(header_title.count('.') + 1),
-                        "full_text": section_text.strip()
+                        "full_text": section_text.strip(),
+                        "page": page_num + 1
                     })
 
             return sections
@@ -989,39 +1009,13 @@ class PDFProcessor:
         except Exception as e:
             print(f"Error extracting sections: {str(e)}")
             return []
-
-    def process_sections(self, sections: List[Dict], regulation_id: int) -> Dict:
-        """
-        Process sections in batches with parallel processing
-        """
-        self.total_sections = len(sections)
-        self.processed_count = 0
-        results = {
-            'successful': [],
-            'failed': [],
-            'total_processed': 0
-        }
-
-        # Process sections in batches
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = []
-            for i in range(0, len(sections), self.chunk_size):
-                batch = sections[i:i + self.chunk_size]
-                future = executor.submit(self._process_batch, batch, regulation_id)
-                futures.append(future)
-
-            # Collect results
-            for future in futures:
-                batch_result = future.result()
-                results['successful'].extend(batch_result['successful'])
-                results['failed'].extend(batch_result['failed'])
-                results['total_processed'] += len(batch_result['successful'])
-
-        return results
+        finally:
+            if 'doc' in locals():
+                doc.close()
 
     def _process_batch(self, batch: List[Dict], regulation_id: int) -> Dict:
         """
-        Process a batch of sections with duplicate handling
+        Process a batch of sections with improved error handling
         """
         batch_results = {
             'successful': [],
@@ -1030,14 +1024,21 @@ class PDFProcessor:
 
         for section_data in batch:
             try:
-                # Process text and generate features
-                full_text = section_data.get('full_text', '')
-                summary = generate_summary(full_text)
-                keywords = extract_keywords(full_text)
-                vector_embedding = generate_vector_embedding(full_text)
+                # Process text and generate features with timeout
+                with ThreadPoolExecutor(max_workers=3) as executor:
+                    future_summary = executor.submit(generate_summary, section_data.get('full_text', ''))
+                    future_keywords = executor.submit(extract_keywords, section_data.get('full_text', ''))
+                    future_embedding = executor.submit(generate_vector_embedding, section_data.get('full_text', ''))
 
-                # Try to find existing section
-                existing_section = RegulationSections.find_section_by_name(
+                    try:
+                        summary = future_summary.result(timeout=60)
+                        keywords = future_keywords.result(timeout=60)
+                        vector_embedding = future_embedding.result(timeout=60)
+                    except TimeoutError:
+                        raise Exception("Processing timeout")
+
+                # Try to find existing section by name and regulation_id
+                existing_section = RegulationSections.find_section_by_name_and_regulation(
                     regulation_id=regulation_id,
                     section_name=section_data['section_name']
                 )
@@ -1048,10 +1049,11 @@ class PDFProcessor:
                         section_id=existing_section['id'],
                         data={
                             'section_number': section_data.get('section_number'),
-                            'full_text': full_text,
+                            'full_text': section_data.get('full_text', ''),
                             'summary': summary,
                             'keywords': keywords,
-                            'vector_embedding': vector_embedding
+                            'vector_embedding': vector_embedding,
+                            'page': section_data.get('page')
                         }
                     )
                     action = 'updated'
@@ -1061,10 +1063,11 @@ class PDFProcessor:
                         regulation_id=regulation_id,
                         section_name=section_data['section_name'],
                         section_number=section_data.get('section_number'),
-                        full_text=full_text,
+                        full_text=section_data.get('full_text', ''),
                         summary=summary,
                         keywords=keywords,
-                        vector_embedding=vector_embedding
+                        vector_embedding=vector_embedding,
+                        page=section_data.get('page')
                     )
                     action = 'created'
 
