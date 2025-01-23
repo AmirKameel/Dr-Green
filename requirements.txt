@@ -11,3 +11,4 @@ openai
 python-multipart
 werkzeug
 toml
+tenacity
