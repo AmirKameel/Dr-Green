@@ -925,84 +925,142 @@ class FlexibleAuditProcessor:
 
 
 
+import os
+from typing import Dict, List
+import fitz  # PyMuPDF
+import re
+from collections import defaultdict
+import time
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 class PDFProcessor:
-    def __init__(self, chunk_size=5, max_workers=4, timeout=300):
-        self.chunk_size = chunk_size
-        self.max_workers = max_workers
-        self.timeout = timeout
+    def __init__(self, chunk_size=5, max_workers=2, max_retries=3):
+        self.chunk_size = chunk_size  # Reduced chunk size for better stability
+        self.max_workers = max_workers  # Reduced workers to prevent overload
+        self.max_retries = max_retries
         self.processed_count = 0
         self.total_sections = 0
         self._lock = threading.Lock()
+        self.section_counter = defaultdict(int)
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry_error_callback=lambda retry_state: {"error": "Max retries reached"}
+    )
+    def _extract_page_text(self, doc, page_num: int) -> str:
+        """
+        Extract text from a page with retry logic
+        """
+        try:
+            page = doc.load_page(page_num)
+            text = page.get_text("text")
+            if not text:
+                text = page.get_text("blocks")
+            return text if text else ""
+        except Exception as e:
+            print(f"Error extracting text from page {page_num}: {str(e)}")
+            raise
 
     def extract_sections(self, pdf_path: str, expand_pages: int = 7) -> List[Dict]:
         """
-        Extract sections from PDF with improved duplicate handling
+        Extract sections from PDF with improved error handling
         """
+        sections = []
+        seen_sections = defaultdict(int)
+
         try:
             doc = fitz.open(pdf_path)
             toc = doc.get_toc()
-            sections = []
-            seen_sections = {}  # Track sections we've seen
 
             # Process TOC entries
             for level, title, page in toc:
                 try:
                     section_text = ""
-                    for i in range(page - 1, min(page - 1 + expand_pages + 1, len(doc))):
-                        page_text = doc.load_page(i).get_text("text")
-                        if not page_text:
-                            page_text = doc.load_page(i).get_text("blocks")
-                        section_text += page_text if page_text else ""
+                    success = False
+                    retry_count = 0
 
-                    # Handle duplicate sections by appending a counter
+                    while not success and retry_count < self.max_retries:
+                        try:
+                            for i in range(page - 1, min(page - 1 + expand_pages + 1, len(doc))):
+                                page_text = self._extract_page_text(doc, i)
+                                section_text += page_text
+
+                            success = True
+                        except Exception as e:
+                            retry_count += 1
+                            if retry_count < self.max_retries:
+                                time.sleep(2 ** retry_count)  # Exponential backoff
+                            else:
+                                print(f"Failed to extract section {title} after {self.max_retries} attempts")
+                                section_text = f"Error extracting text: {str(e)}"
+
+                    # Handle duplicate section names
                     base_title = title
-                    if base_title in seen_sections:
-                        seen_sections[base_title] += 1
-                        title = f"{base_title} ({seen_sections[base_title]})"
-                    else:
-                        seen_sections[base_title] = 1
+                    seen_sections[base_title] += 1
+                    if seen_sections[base_title] > 1:
+                        title = f"{base_title} (Version {seen_sections[base_title]})"
 
                     sections.append({
                         "section_name": title,
                         "section_number": str(level),
                         "full_text": section_text.strip(),
-                        "page": page
+                        "original_title": base_title,
+                        "extraction_status": "success" if success else "partial_failure"
                     })
 
                 except Exception as e:
-                    print(f"Error processing TOC section {title}: {str(e)}")
+                    print(f"Error processing section {title}: {str(e)}")
+                    sections.append({
+                        "section_name": title,
+                        "section_number": str(level),
+                        "full_text": f"Error processing section: {str(e)}",
+                        "original_title": title,
+                        "extraction_status": "failure"
+                    })
 
-            # Find additional sections using regex patterns
+            # Process regex patterns with similar retry logic
             pattern = r'\b(ORG \d+(\.\d+){1,5})\b'
             for page_num in range(len(doc)):
-                page_text = doc.load_page(page_num).get_text("text")
-                headers = re.findall(pattern, page_text)
+                try:
+                    page_text = self._extract_page_text(doc, page_num)
+                    headers = re.findall(pattern, page_text)
 
-                for header in headers:
-                    section_text = ""
-                    header_title = header[0]
-                    
-                    # Handle duplicate ORG sections
-                    base_title = header_title
-                    if base_title in seen_sections:
-                        seen_sections[base_title] += 1
-                        header_title = f"{base_title} ({seen_sections[base_title]})"
-                    else:
-                        seen_sections[base_title] = 1
+                    for header in headers:
+                        base_header_title = header[0]
+                        seen_sections[base_header_title] += 1
+                        header_title = base_header_title
+                        
+                        if seen_sections[base_header_title] > 1:
+                            header_title = f"{base_header_title} (Version {seen_sections[base_header_title]})"
 
-                    # Extract text for found section
-                    for i in range(page_num, min(page_num + expand_pages + 1, len(doc))):
-                        page_text = doc.load_page(i).get_text("text")
-                        if not page_text:
-                            page_text = doc.load_page(i).get_text("blocks")
-                        section_text += page_text if page_text else ""
+                        section_text = ""
+                        success = False
+                        retry_count = 0
 
-                    sections.append({
-                        "section_name": header_title,
-                        "section_number": str(header_title.count('.') + 1),
-                        "full_text": section_text.strip(),
-                        "page": page_num + 1
-                    })
+                        while not success and retry_count < self.max_retries:
+                            try:
+                                for i in range(page_num, min(page_num + expand_pages + 1, len(doc))):
+                                    page_text = self._extract_page_text(doc, i)
+                                    section_text += page_text
+                                success = True
+                            except Exception as e:
+                                retry_count += 1
+                                if retry_count < self.max_retries:
+                                    time.sleep(2 ** retry_count)
+                                else:
+                                    section_text = f"Error extracting text: {str(e)}"
+
+                        sections.append({
+                            "section_name": header_title,
+                            "section_number": str(base_header_title.count('.') + 1),
+                            "full_text": section_text.strip(),
+                            "original_title": base_header_title,
+                            "extraction_status": "success" if success else "partial_failure"
+                        })
+
+                except Exception as e:
+                    print(f"Error processing page {page_num}: {str(e)}")
 
             return sections
 
@@ -1012,6 +1070,88 @@ class PDFProcessor:
         finally:
             if 'doc' in locals():
                 doc.close()
+
+    def _process_batch(self, batch: List[Dict], regulation_id: int) -> Dict:
+        """
+        Process a batch of sections with improved error handling
+        """
+        batch_results = {
+            'successful': [],
+            'failed': [],
+            'partial': []
+        }
+
+        for section_data in batch:
+            try:
+                # Skip processing if extraction failed
+                if section_data.get('extraction_status') == 'failure':
+                    batch_results['failed'].append({
+                        'section_name': section_data.get('section_name'),
+                        'error': 'Text extraction failed'
+                    })
+                    continue
+
+                # Process text and generate features
+                full_text = section_data.get('full_text', '')
+                if full_text.startswith('Error'):
+                    batch_results['failed'].append({
+                        'section_name': section_data.get('section_name'),
+                        'error': full_text
+                    })
+                    continue
+
+                # Add delay between processing to prevent overload
+                time.sleep(0.1)
+
+                summary = generate_summary(full_text)
+                keywords = extract_keywords(full_text)
+                vector_embedding = generate_vector_embedding(full_text)
+
+                with self._lock:
+                    self.section_counter[section_data['original_title']] += 1
+                    current_count = self.section_counter[section_data['original_title']]
+
+                final_section_name = section_data['section_name']
+
+                section = RegulationSections.create_section(
+                    regulation_id=regulation_id,
+                    section_name=final_section_name,
+                    section_number=section_data.get('section_number'),
+                    full_text=full_text,
+                    summary=summary,
+                    keywords=keywords,
+                    vector_embedding=vector_embedding,
+                    original_title=section_data['original_title']
+                )
+
+                status = 'successful'
+                if section_data.get('extraction_status') == 'partial_failure':
+                    status = 'partial'
+                    batch_results['partial'].append({
+                        'section_name': final_section_name,
+                        'id': section.get('id'),
+                        'message': 'Partial content extracted'
+                    })
+                else:
+                    batch_results['successful'].append({
+                        'section_name': final_section_name,
+                        'id': section.get('id'),
+                        'action': 'created'
+                    })
+
+                with self._lock:
+                    self.processed_count += 1
+                    progress = (self.processed_count / self.total_sections) * 100
+                    print(f"Progress: {progress:.2f}% ({self.processed_count}/{self.total_sections}) - Status: {status}")
+
+            except Exception as e:
+                print(f"Error processing section {section_data.get('section_name')}: {str(e)}")
+                batch_results['failed'].append({
+                    'section_name': section_data.get('section_name'),
+                    'error': str(e)
+                })
+
+        return batch_results
 
     def process_sections(self, sections: List[Dict], regulation_id: int) -> Dict:
         """
@@ -1025,86 +1165,22 @@ class PDFProcessor:
             'total_processed': 0
         }
 
-    
-    def _process_batch(self, batch: List[Dict], regulation_id: int) -> Dict:
-        """
-        Process a batch of sections with improved error handling
-        """
-        batch_results = {
-            'successful': [],
-            'failed': []
-        }
+        # Process sections in batches
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = []
+            for i in range(0, len(sections), self.chunk_size):
+                batch = sections[i:i + self.chunk_size]
+                future = executor.submit(self._process_batch, batch, regulation_id)
+                futures.append(future)
 
-        for section_data in batch:
-            try:
-                # Process text and generate features with timeout
-                with ThreadPoolExecutor(max_workers=3) as executor:
-                    future_summary = executor.submit(generate_summary, section_data.get('full_text', ''))
-                    future_keywords = executor.submit(extract_keywords, section_data.get('full_text', ''))
-                    future_embedding = executor.submit(generate_vector_embedding, section_data.get('full_text', ''))
+            # Collect results
+            for future in futures:
+                batch_result = future.result()
+                results['successful'].extend(batch_result['successful'])
+                results['failed'].extend(batch_result['failed'])
+                results['total_processed'] += len(batch_result['successful'])
 
-                    try:
-                        summary = future_summary.result(timeout=60)
-                        keywords = future_keywords.result(timeout=60)
-                        vector_embedding = future_embedding.result(timeout=60)
-                    except TimeoutError:
-                        raise Exception("Processing timeout")
-
-                # Try to find existing section by name and regulation_id
-                existing_section = RegulationSections.find_section_by_name_and_regulation(
-                    regulation_id=regulation_id,
-                    section_name=section_data['section_name']
-                )
-
-                if existing_section:
-                    # Update existing section
-                    section = RegulationSections.update_section(
-                        section_id=existing_section['id'],
-                        data={
-                            'section_number': section_data.get('section_number'),
-                            'full_text': section_data.get('full_text', ''),
-                            'summary': summary,
-                            'keywords': keywords,
-                            'vector_embedding': vector_embedding,
-                            'page': section_data.get('page')
-                        }
-                    )
-                    action = 'updated'
-                else:
-                    # Create new section
-                    section = RegulationSections.create_section(
-                        regulation_id=regulation_id,
-                        section_name=section_data['section_name'],
-                        section_number=section_data.get('section_number'),
-                        full_text=section_data.get('full_text', ''),
-                        summary=summary,
-                        keywords=keywords,
-                        vector_embedding=vector_embedding,
-                        page=section_data.get('page')
-                    )
-                    action = 'created'
-
-                batch_results['successful'].append({
-                    'section_name': section_data['section_name'],
-                    'id': section.get('id'),
-                    'action': action
-                })
-
-                # Update progress
-                with self._lock:
-                    self.processed_count += 1
-                    progress = (self.processed_count / self.total_sections) * 100
-                    print(f"Progress: {progress:.2f}% ({self.processed_count}/{self.total_sections})")
-
-            except Exception as e:
-                print(f"Error processing section {section_data.get('section_name')}: {str(e)}")
-                batch_results['failed'].append({
-                    'section_name': section_data.get('section_name'),
-                    'error': str(e)
-                })
-
-        return batch_results
-
+        return results
 
 def perform_audit(iosa_checklist: str, input_text: str) -> str:
     """
