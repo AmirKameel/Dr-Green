@@ -13,7 +13,8 @@ class RegulationSections:
         keywords: list = None,
         category: str = None,
         subcategory: str = None,
-        vector_embedding: list = None
+        vector_embedding: list = None,
+        original_title: str = None
     ):
         """
         Insert a new section into the regulation_sections table.
@@ -43,7 +44,8 @@ class RegulationSections:
             "keywords": keywords,
             "category": category,
             "subcategory": subcategory,
-            "vector_embedding": vector_embedding
+            "vector_embedding": vector_embedding,
+            "original_title" : original_title
         }
         response = supabase.table("regulation_sections").insert(data).execute()
         return response.data[0] if response.data else None
