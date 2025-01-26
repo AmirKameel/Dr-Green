@@ -1316,6 +1316,7 @@ def conduct_audit():
         }), 500
     
 @app.route('/auditv1', methods=['POST'])
+@require_api_key
 def audit():
     """
     API endpoint to perform aviation compliance audit.
