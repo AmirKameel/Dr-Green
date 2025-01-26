@@ -1315,6 +1315,43 @@ def conduct_audit():
             "details": str(e)
         }), 500
     
+@app.route('/auditv1', methods=['POST'])
+def conduct_audit():
+    """
+    API endpoint to perform aviation compliance audit.
+    Returns the audit result as plain text.
+    """
+    try:
+        # Validate request data
+        if not request.is_json:
+            return jsonify({"error": "Request must be JSON"}), 400
+
+        data = request.json
+        required_fields = ['iosa_checklist', 'input_text']
+
+        # Check if all required fields are present
+        missing_fields = [field for field in required_fields if field not in data]
+        if missing_fields:
+            return jsonify({
+                "error": f"Missing required fields: {', '.join(missing_fields)}"
+            }), 400
+
+        # Perform the audit
+        audit_result = perform_audit(
+            data['iosa_checklist'],
+            data['input_text']
+        )
+
+        # Return the audit result as plain text
+        return audit_result, 200, {'Content-Type': 'text/plain'}
+
+    except Exception as e:
+        return jsonify({
+            "error": f"Error performing audit: {str(e)}"
+        }), 500
+
+
+
 
 def extract_toc_and_sections(pdf_path: str, expand_pages: int = 7) -> Dict[str, List[Dict[str, Any]]]:
     """
