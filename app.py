@@ -1251,6 +1251,7 @@ def perform_audit(iosa_checklist: str, input_text: str) -> str:
                 )
             }
         ],
+        temperature=0.3,        
         max_tokens=4000
     )
     
