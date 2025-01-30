@@ -624,10 +624,7 @@ def calculate_weighted_similarity(section_data, profile_data):
     return total_score
 
 
-from nltk.corpus import stopwords as nltk_stopwords
 
-# Ensure stopwords are properly initialized
-stopwords = set(nltk_stopwords.words('english'))
 
 def extract_keywords(text):
     """Extract keywords with domain-specific enhancements"""
