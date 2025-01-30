@@ -566,83 +566,163 @@ def health_check():
 
 
 #similart
+def build_profile_text(profile_data):
+    """Convert airline profile into a text representation"""
+    profile_text = []
+
+    # Add technical profile
+    if profile_data.get('technical_profile'):
+        for field, value in profile_data['technical_profile'].items():
+            if value == "YES":
+                profile_text.append(f"The airline has implemented {field.replace('_', ' ')}.")
+            elif value == "NO":
+                profile_text.append(f"The airline has not implemented {field.replace('_', ' ')}.")
+            elif value == "N/A":
+                profile_text.append(f"{field.replace('_', ' ')} is not applicable to the airline.")
+
+    # Add crew composition
+    if profile_data.get('composition_of_crew'):
+        crew_text = "The airline operates with "
+        crew_parts = []
+        for field, value in profile_data['composition_of_crew'].items():
+            if value == "YES":
+                crew_parts.append(field.replace('_', ' '))
+        profile_text.append(crew_text + ", ".join(crew_parts) + ".")
+
+    # Add aircraft groups
+    if profile_data.get('aircraft_groups'):
+        for field, value in profile_data['aircraft_groups'].items():
+            if value == "YES":
+                profile_text.append(f"The airline operates {field.replace('_', ' ')} aircraft.")
+
+    return " ".join(profile_text)
+    
+
+def calculate_weighted_similarity(section_data, profile_data):
+    """Calculate similarity with weighted profile fields"""
+    weights = {
+        'technical_profile': 0.6,
+        'composition_of_crew': 0.2,
+        'aircraft_groups': 0.2
+    }
+    
+    total_score = 0.0
+    
+    # Calculate similarity for each profile part
+    for part, weight in weights.items():
+        if part in profile_data:
+            part_text = build_profile_text({part: profile_data[part]})
+            part_embedding = generate_vector_embedding(part_text)
+            section_embedding = section_data.get('vector_embedding', [])
+            
+            if section_embedding:
+                similarity = np.dot(part_embedding, section_embedding) / (
+                    np.linalg.norm(part_embedding) * np.linalg.norm(section_embedding)
+                )
+                total_score += similarity * weight
+    
+    return total_score
+
+
+from nltk.corpus import stopwords as nltk_stopwords
+
+# Ensure stopwords are properly initialized
+stopwords = set(nltk_stopwords.words('english'))
+
+def extract_keywords(text):
+    """Extract keywords with domain-specific enhancements"""
+    keywords = set()
+    
+    # Add domain-specific terms
+    aviation_terms = {
+        "fatigue": ["fatigue risk", "crew rest", "safety management"],
+        "baggage": ["carry-on", "checked baggage", "luggage"],
+        "operations": ["flight operations", "safety protocols", "regulatory compliance"]
+    }
+    
+    for term, synonyms in aviation_terms.items():
+        if term in text.lower():
+            keywords.update(synonyms)
+    
+    # Add general keywords
+    words = word_tokenize(text.lower())
+    keywords.update([word for word in words if word.isalpha() and word not in stopwords])
+    
+    return list(keywords)
 
 def calculate_similarity(section_data, profile_data):
-    """Calculate similarity between section and profile with fixed dimensions"""
+    """Calculate similarity between section and profile with semantic embeddings"""
     try:
-        scores = {
-            'total_score': 0.0,
-            'keyword_score': 0.0,
-            'text_similarity_score': 0.0,
-            'profile_matches': []
-        }
-
         # Build profile text
-        profile_parts = []
-        if profile_data.get('aircraft_type'):
-            profile_parts.append(f"Aircraft type: {profile_data['aircraft_type']}")
-        if profile_data.get('type_of_operation'):
-            profile_parts.append(f"Operation type: {profile_data['type_of_operation']}")
+        profile_text = build_profile_text(profile_data)
+        print(f"Generated profile text: {profile_text[:100]}...")
+        
+        # Generate embeddings with validation
+        profile_embedding = generate_vector_embedding(profile_text)
+        section_embedding = section_data.get('vector_embedding', [])
+        
+        # Ensure section_embedding is a list of floats
+        if isinstance(section_embedding, str):
+            section_embedding = json.loads(section_embedding)
+        
+        # Validate embeddings
+        if not profile_embedding or not section_embedding:
+            print("Warning: Missing embeddings")
+            return {
+                'total_score': 0.0,
+                'keyword_score': 0.0,
+                'text_similarity_score': 0.0,
+                'profile_matches': []
+            }
 
-        ops_specs = profile_data.get('ops_specs', {})
-        if ops_specs:
-            enabled_specs = [f"{k}: {v}" for k, v in ops_specs.items()]
-            profile_parts.extend(enabled_specs)
-
-        profile_text = ' '.join(profile_parts)
-
-        # Calculate keyword similarity
+        # Convert to numpy arrays and ensure float32
+        profile_vector = np.array(profile_embedding, dtype=np.float32)
+        section_vector = np.array(section_embedding, dtype=np.float32)
+        
+        print(f"Profile vector shape: {profile_vector.shape}")
+        print(f"Section vector shape: {section_vector.shape}")
+        
+        # Calculate cosine similarity
+        dot_product = np.dot(profile_vector, section_vector)
+        profile_norm = np.linalg.norm(profile_vector)
+        section_norm = np.linalg.norm(section_vector)
+        
+        if profile_norm == 0 or section_norm == 0:
+            similarity = 0.0
+        else:
+            similarity = dot_product / (profile_norm * section_norm)
+            
+        # Get keywords for additional scoring
         profile_keywords = set(extract_keywords(profile_text))
         section_keywords = set(section_data.get('keywords', []))
+        matching_keywords = profile_keywords.intersection(section_keywords)
         
-        if section_keywords and profile_keywords:
-            matching_keywords = section_keywords.intersection(profile_keywords)
-            scores['keyword_score'] = len(matching_keywords) / max(len(section_keywords), 1)
-            scores['profile_matches'] = list(matching_keywords)
-
-        # Calculate text similarity using fixed-dimension vectors
-        section_embedding = section_data.get('vector_embedding', [])
-        if isinstance(section_embedding, str):
-            try:
-                section_embedding = eval(section_embedding)
-            except:
-                section_embedding = []
-
-        if section_embedding:
-            profile_embedding = generate_vector_embedding(profile_text)
-            
-            # Ensure both embeddings have the same dimension
-            if len(section_embedding) != len(profile_embedding):
-                print(f"Warning: Embedding dimension mismatch. Section: {len(section_embedding)}, Profile: {len(profile_embedding)}")
-                # Pad the shorter embedding if necessary
-                max_dim = max(len(section_embedding), len(profile_embedding))
-                section_embedding = np.pad(section_embedding, (0, max_dim - len(section_embedding)))
-                profile_embedding = np.pad(profile_embedding, (0, max_dim - len(profile_embedding)))
-            
-            # Calculate cosine similarity
-            dot_product = np.dot(section_embedding, profile_embedding)
-            norm_product = (np.linalg.norm(section_embedding) * 
-                          np.linalg.norm(profile_embedding))
-            
-            if norm_product != 0:
-                scores['text_similarity_score'] = float(dot_product / norm_product)
-
-        # Calculate total score
-        scores['total_score'] = (scores['keyword_score'] * 0.5 + 
-                               scores['text_similarity_score'] * 0.5)
-
-        return scores
+        keyword_score = len(matching_keywords) / max(len(section_keywords), 1)
+        
+        # Calculate weighted score
+        total_score = (similarity * 0.7) + (keyword_score * 0.3)
+        
+        print(f"Similarity scores for section {section_data.get('section_name')}:")
+        print(f"Text similarity: {similarity:.4f}")
+        print(f"Keyword score: {keyword_score:.4f}")
+        print(f"Total score: {total_score:.4f}")
+        
+        return {
+            'total_score': float(total_score),
+            'keyword_score': float(keyword_score),
+            'text_similarity_score': float(similarity),
+            'profile_matches': list(matching_keywords)
+        }
 
     except Exception as e:
-        print(f"Similarity calculation error: {str(e)}")
+        print(f"Error calculating similarity: {str(e)}")
+        traceback.print_exc()
         return {
             'total_score': 0.0,
             'keyword_score': 0.0,
             'text_similarity_score': 0.0,
             'profile_matches': []
         }
-
-    
 
 @app.route('/analyze-regulation-similarity/<int:regulation_id>', methods=['POST'])
 def analyze_regulation_similarity(regulation_id):
@@ -671,9 +751,10 @@ def analyze_regulation_similarity(regulation_id):
         # Calculate similarity for each section
         results = []
         for section in sections:
-            try:
-                similarity_scores = calculate_similarity(section, profile_data)
-                
+            similarity_scores = calculate_similarity(section, profile_data)
+            
+            # Only include sections with meaningful similarity
+            if similarity_scores['total_score'] > 0.1:  # Minimum threshold
                 result = {
                     'section_id': section.get('id'),
                     'section_name': section.get('section_name'),
@@ -682,25 +763,23 @@ def analyze_regulation_similarity(regulation_id):
                     'similarity_scores': similarity_scores,
                     'relevance_explanation': (
                         f"Section '{section.get('section_name')}' has a "
-                        f"total similarity score of {similarity_scores['total_score']:.2f}."
+                        f"similarity score of {similarity_scores['total_score']:.2f}"
                     )
                 }
                 results.append(result)
-                
-            except Exception as e:
-                print(f"Error processing section {section.get('id')}: {str(e)}")
-                continue
         
-        # Sort by similarity score
+        # Sort by total score
         results.sort(key=lambda x: x['similarity_scores']['total_score'], reverse=True)
         
         return jsonify({
             'regulation_id': regulation_id,
-            'analysis_results': results
+            'analysis_results': results,
+            'total_matches': len(results)
         }), 200
         
     except Exception as e:
-        print(f"Analysis error: {str(e)}\n{traceback.format_exc()}")
+        print(f"Analysis error: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
