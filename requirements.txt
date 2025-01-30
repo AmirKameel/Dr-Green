@@ -12,3 +12,4 @@ python-multipart
 werkzeug
 toml
 tenacity
+sentence_transformers
