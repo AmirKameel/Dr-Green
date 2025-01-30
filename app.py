@@ -95,7 +95,7 @@ except Exception:
 
 from nltk.corpus import stopwords as nltk_stopwords
 
-
+download_nltk_data()
 
 def extract_keywords(text):
     """Extract keywords with domain-specific enhancements"""
