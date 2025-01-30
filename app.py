@@ -120,7 +120,7 @@ def extract_keywords(text):
     
     # Add general keywords
     words = word_tokenize(text_lower)
-    stop_words = set(nltk_stopwords.words('english'))
+  
     keywords.update([word for word in words if word.isalpha() and word not in stop_words])
     
     return list(keywords)
