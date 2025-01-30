@@ -101,22 +101,26 @@ except Exception:
 download_nltk_data()
 
 def extract_keywords(text):
-    """Extract keywords with domain-specific enhancements"""
-    keywords = set()
-    
-    # Add domain-specific terms
+    """Extract aviation-specific keywords"""
     aviation_terms = {
-        "fatigue": ["fatigue risk", "crew rest", "safety management"],
-        "baggage": ["carry-on", "checked baggage", "luggage"],
-        "operations": ["flight operations", "safety protocols", "regulatory compliance"]
+        "FRMS": ["fatigue risk management system", "crew rest", "safety protocols"],
+        "EFB": ["electronic flight bag", "flight planning", "PBN"],
+        "ADS-B": ["automatic dependent surveillance", "situational awareness", "RVSM"],
+        "Multi-crew": ["multi-pilot operations", "cockpit crew", "flight deck team"],
+        "A320": ["airbus a320", "fly-by-wire", "advanced avionics"]
     }
     
+    keywords = set()
+    text_lower = text.lower()
+    
+    # Match profile-specific terms
     for term, synonyms in aviation_terms.items():
-        if term in text.lower():
-            keywords.update(synonyms)
+        if term.lower() in text_lower or any(synonym in text_lower for synonym in synonyms):
+            keywords.update([term] + synonyms)
     
     # Add general keywords
-    words = word_tokenize(text.lower())
+    words = word_tokenize(text_lower)
+    stop_words = set(nltk_stopwords.words('english'))
     keywords.update([word for word in words if word.isalpha() and word not in stop_words])
     
     return list(keywords)
@@ -279,34 +283,7 @@ def generate_summary(text: str) -> str:
         return text[:200] + "..."
 
 
-def generate_vector_embedding(text: str) -> list:
-    """
-    Generate document embedding using TF-IDF with matching dimensions.
-    """
-    vector_size = 384  # Match the existing embedding size
-    if not text:
-        return [0] * vector_size
-    try:
-        # Initialize TF-IDF with matching dimensions
-        tfidf = TfidfVectorizer(max_features=vector_size)
-        
-        # Create a small corpus with the text to ensure proper vectorization
-        corpus = [text]
-        
-        # Fit and transform the text
-        sparse_vector = tfidf.fit_transform(corpus)
-        
-        # Convert to dense array and ensure fixed size
-        dense_vector = sparse_vector.toarray()[0]
-        
-        # Pad or truncate to match exact size
-        if len(dense_vector) < vector_size:
-            return np.pad(dense_vector, (0, vector_size - len(dense_vector))).tolist()
-        return dense_vector[:vector_size].tolist()
 
-    except Exception as e:
-        print(f"Error generating embedding: {e}")
-        return [0] * vector_size
 
 # Regulations Endpoints
 @app.route('/regulations', methods=['GET'])
@@ -600,36 +577,119 @@ def health_check():
 
 #similart
 def build_profile_text(profile_data):
-    """Convert airline profile into a text representation"""
+    """Convert airline profile to a focused text description"""
     profile_text = []
-
-    # Add technical profile
-    if profile_data.get('technical_profile'):
-        for field, value in profile_data['technical_profile'].items():
-            if value == "YES":
-                profile_text.append(f"The airline has implemented {field.replace('_', ' ')}.")
-            elif value == "NO":
-                profile_text.append(f"The airline has not implemented {field.replace('_', ' ')}.")
-            elif value == "N/A":
-                profile_text.append(f"{field.replace('_', ' ')} is not applicable to the airline.")
-
-    # Add crew composition
-    if profile_data.get('composition_of_crew'):
-        crew_text = "The airline operates with "
-        crew_parts = []
-        for field, value in profile_data['composition_of_crew'].items():
-            if value == "YES":
-                crew_parts.append(field.replace('_', ' '))
-        profile_text.append(crew_text + ", ".join(crew_parts) + ".")
-
-    # Add aircraft groups
-    if profile_data.get('aircraft_groups'):
-        for field, value in profile_data['aircraft_groups'].items():
-            if value == "YES":
-                profile_text.append(f"The airline operates {field.replace('_', ' ')} aircraft.")
-
-    return " ".join(profile_text)
     
+    # Technical profile
+    tech = profile_data.get('technical_profile', {})
+    if tech.get('FATIGUE_RISK_MANAGEMENT_SYSTEM') == "YES":
+        profile_text.append("The airline operates a Fatigue Risk Management System (FRMS) with real-time crew monitoring and onboard rest facilities.")
+    if tech.get('USE_OF_ELECTRONIC_FLIGHT_BAG') == "YES":
+        profile_text.append("The fleet uses Electronic Flight Bags (EFB) for Performance-Based Navigation (PBN) and advanced flight planning.")
+    if tech.get('AUTOMATIC_DEPENDENT_SURVEILLANCE_BROADCAST_ADS_B_OUT_OPERATIONS') == "YES":
+        profile_text.append("ADS-B technology is implemented for enhanced surveillance in RVSM airspace.")
+    
+    # Aircraft details
+    if profile_data.get('aircraft_groups', {}).get('Group_4_Total_weight_exceeds_5700_Kg_12500_lbs_Turbo_Jet_powered') == "YES":
+        profile_text.append("The airline operates Airbus A320/A321 jets with modern avionics and multi-crew cockpits.")
+    
+    return ". ".join(profile_text)
+    
+def calculate_similarity2(section_data, profile_data):
+    try:
+        # Generate embeddings
+        profile_text = build_profile_text(profile_data)
+        section_text = section_data.get('full_text', '')
+        
+        profile_embedding = generate_vector_embedding(profile_text)
+        section_embedding = generate_vector_embedding(section_text)
+        
+        # Cosine similarity
+        similarity = np.dot(profile_embedding, section_embedding) / (
+            np.linalg.norm(profile_embedding) * np.linalg.norm(section_embedding)
+        )
+        
+        # Keyword matching
+        profile_keywords = set(extract_keywords(profile_text))
+        section_keywords = set(extract_keywords(section_text))
+        matching_keywords = profile_keywords.intersection(section_keywords)
+        
+        return {
+            'total_score': similarity * 0.8 + (len(matching_keywords)/50) * 0.2,  # 80% weight to semantic similarity
+            'keyword_score': len(matching_keywords) / 50,  # Normalized to 0-1
+            'text_similarity_score': similarity,
+            'profile_matches': list(matching_keywords)
+        }
+    
+    except Exception as e:
+        print(f"Similarity error: {str(e)}")
+        return {'total_score': 0.0, 'keyword_score': 0.0, 'text_similarity_score': 0.0, 'profile_matches': []}
+
+
+@app.route('/analyze-section-similarity', methods=['POST'])
+def analyze_section_similarity():
+    """
+    Analyze similarity between a given section and an airline profile.
+    Generates embeddings dynamically for both the section and profile.
+    """
+    try:
+        # Validate request
+        if not request.is_json:
+            return jsonify({"error": "Request must be JSON"}), 400
+
+        data = request.get_json()
+        
+        # Check for required fields
+        if 'section' not in data or 'airline_profile' not in data:
+            return jsonify({"error": "Missing required fields (section and airline_profile)"}), 400
+
+        section_data = data['section']
+        profile_data = data['airline_profile']
+
+        # Log incoming request
+        print(f"Analyzing section similarity with profile:\n{json.dumps(profile_data, indent=2)}")
+
+        # Generate embeddings for the section
+        section_text = section_data.get('full_text', '')
+        if not section_text:
+            return jsonify({"error": "Section text is required"}), 400
+        section_embedding = generate_vector_embedding(section_text)
+
+        # Generate embeddings for the airline profile
+        profile_text = build_profile_text(profile_data)
+        profile_embedding = generate_vector_embedding(profile_text)
+
+        # Log embeddings for debugging
+        print(f"Section Embedding: {section_embedding}")
+        print(f"Profile Embedding: {profile_embedding}")
+
+        # Calculate similarity
+        similarity_scores = calculate_similarity2(
+            {
+                'section_name': section_data.get('section_name', 'Unnamed Section'),
+                'full_text': section_text,
+                'vector_embedding': section_embedding,
+                'keywords': extract_keywords(section_text)
+            },
+            profile_data
+        )
+
+        # Prepare response
+        response = {
+            'section_name': section_data.get('section_name', 'Unnamed Section'),
+            'similarity_scores': similarity_scores,
+            'relevance_explanation': (
+                f"Section '{section_data.get('section_name', 'Unnamed Section')}' has a "
+                f"similarity score of {similarity_scores['total_score']:.2f}"
+            )
+        }
+
+        return jsonify(response), 200
+
+    except Exception as e:
+        print(f"Error analyzing section similarity: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 def calculate_weighted_similarity(section_data, profile_data):
     """Calculate similarity with weighted profile fields"""
