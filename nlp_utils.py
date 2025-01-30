@@ -17,55 +17,26 @@ stop_words = set(['i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', '
                      'further', 'then', 'once'])
 
 
-def extract_keywords(text: str, max_keywords: int = 5) -> list:
-    """
-    Extract keywords with robust error handling and fallback mechanisms
-    """
-    if not text:
-        return []
-        
-    try:
-        # Limit input size for processing efficiency
-        max_length = 10000
-        if len(text) > max_length:
-            text = text[:max_length]
-
-        # Simple tokenization fallback if NLTK fails
-        try:
-            tokens = word_tokenize(text.lower())
-        except Exception:
-            tokens = text.lower().split()
-
-        # Simple POS tagging fallback if NLTK fails
-        try:
-            tagged = pos_tag(tokens)
-            # Keep only nouns and adjectives
-            important_words = [word for word, tag in tagged 
-                             if tag.startswith(('NN', 'JJ')) 
-                             and word not in stop_words 
-                             and len(word) > 2]
-        except Exception:
-            # Fallback: just filter by length and stopwords
-            important_words = [word for word in tokens 
-                             if word not in stop_words 
-                             and len(word) > 2]
-
-        # Get word frequencies
-        word_freq = Counter(important_words)
-        
-        # Return top keywords
-        return [word for word, _ in word_freq.most_common(max_keywords)]
-
-    except Exception as e:
-        print(f"Error in keyword extraction: {str(e)}")
-        # Last resort fallback: return basic filtered words
-        try:
-            words = text.lower().split()
-            filtered_words = [w for w in words if w not in stop_words and len(w) > 2]
-            return list(set(filtered_words))[:max_keywords]
-        except:
-            return []
-        
+def extract_keywords(text):
+    """Extract keywords with domain-specific enhancements"""
+    keywords = set()
+    
+    # Add domain-specific terms
+    aviation_terms = {
+        "fatigue": ["fatigue risk", "crew rest", "safety management"],
+        "baggage": ["carry-on", "checked baggage", "luggage"],
+        "operations": ["flight operations", "safety protocols", "regulatory compliance"]
+    }
+    
+    for term, synonyms in aviation_terms.items():
+        if term in text.lower():
+            keywords.update(synonyms)
+    
+    # Add general keywords
+    words = word_tokenize(text.lower())
+    keywords.update([word for word in words if word.isalpha() and word not in stopwords])
+    
+    return list(keywords)
 
 # Optimize the NLP functions for better performance
 def generate_summary(text: str) -> str:
