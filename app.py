@@ -39,7 +39,8 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 app.config['AEROSYNC_API_KEY'] = os.getenv('AEROSYNC_API_KEY')  
-
+import nltk
+nltk.download('punkt_tab')
 
 
 
