@@ -626,26 +626,7 @@ def calculate_weighted_similarity(section_data, profile_data):
 
 
 
-def extract_keywords(text):
-    """Extract keywords with domain-specific enhancements"""
-    keywords = set()
-    
-    # Add domain-specific terms
-    aviation_terms = {
-        "fatigue": ["fatigue risk", "crew rest", "safety management"],
-        "baggage": ["carry-on", "checked baggage", "luggage"],
-        "operations": ["flight operations", "safety protocols", "regulatory compliance"]
-    }
-    
-    for term, synonyms in aviation_terms.items():
-        if term in text.lower():
-            keywords.update(synonyms)
-    
-    # Add general keywords
-    words = word_tokenize(text.lower())
-    keywords.update([word for word in words if word.isalpha() and word not in stopwords])
-    
-    return list(keywords)
+
 
 def calculate_similarity(section_data, profile_data):
     """Calculate similarity between section and profile with semantic embeddings"""
