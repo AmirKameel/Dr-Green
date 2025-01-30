@@ -11,7 +11,7 @@ from typing import Dict, Generator, List, Any, Optional
 from dotenv import load_dotenv
 from database.compliance_reports import ComplianceReports
 from database.manual_sections import ManualSections
-from nlp_utils import extract_keywords, generate_summary, generate_vector_embedding
+from nlp_utils import generate_summary, generate_vector_embedding
 from database.regulation_sections import RegulationSections
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
@@ -39,6 +39,8 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 app.config['AEROSYNC_API_KEY'] = os.getenv('AEROSYNC_API_KEY')  
+
+
 
 
 # Create data directory if it doesn't exist
@@ -87,6 +89,34 @@ except Exception:
                      'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to',
                      'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 'under', 'again',
                      'further', 'then', 'once'])
+
+
+
+
+from nltk.corpus import stopwords as nltk_stopwords
+
+
+
+def extract_keywords(text):
+    """Extract keywords with domain-specific enhancements"""
+    keywords = set()
+    
+    # Add domain-specific terms
+    aviation_terms = {
+        "fatigue": ["fatigue risk", "crew rest", "safety management"],
+        "baggage": ["carry-on", "checked baggage", "luggage"],
+        "operations": ["flight operations", "safety protocols", "regulatory compliance"]
+    }
+    
+    for term, synonyms in aviation_terms.items():
+        if term in text.lower():
+            keywords.update(synonyms)
+    
+    # Add general keywords
+    words = word_tokenize(text.lower())
+    keywords.update([word for word in words if word.isalpha() and word not in stopwords])
+    
+    return list(keywords)
 
 
 class BatchProcessor:
@@ -622,7 +652,6 @@ def calculate_weighted_similarity(section_data, profile_data):
                 total_score += similarity * weight
     
     return total_score
-
 
 
 
