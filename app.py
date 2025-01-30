@@ -43,6 +43,12 @@ app.config['AEROSYNC_API_KEY'] = os.getenv('AEROSYNC_API_KEY')
 
 
 
+import os
+import ssl
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+
 # Create data directory if it doesn't exist
 nltk_data_dir = os.path.join(os.getcwd(), 'nltk_data')
 if not os.path.exists(nltk_data_dir):
@@ -63,7 +69,7 @@ def download_nltk_data():
             ssl._create_default_https_context = _create_unverified_https_context
 
         # Download required NLTK data
-        required_packages = ['punkt', 'averaged_perceptron_tagger']
+        required_packages = ['punkt', 'averaged_perceptron_tagger', 'stopwords']
         for package in required_packages:
             try:
                 nltk.download(package, download_dir=nltk_data_dir, quiet=True)
@@ -90,11 +96,7 @@ except Exception:
                      'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 'under', 'again',
                      'further', 'then', 'once'])
 
-
-
-
-from nltk.corpus import stopwords as nltk_stopwords
-
+# Download NLTK data
 download_nltk_data()
 
 def extract_keywords(text):
@@ -114,7 +116,7 @@ def extract_keywords(text):
     
     # Add general keywords
     words = word_tokenize(text.lower())
-    keywords.update([word for word in words if word.isalpha() and word not in stopwords])
+    keywords.update([word for word in words if word.isalpha() and word not in stop_words])
     
     return list(keywords)
 
