@@ -74,31 +74,17 @@ def generate_summary(text: str) -> str:
         return text[:200] + "..."
 
 
-def generate_vector_embedding(text: str) -> list:
-    """
-    Generate document embedding using TF-IDF with matching dimensions.
-    """
-    vector_size = 384  # Match the existing embedding size
-    if not text:
-        return [0] * vector_size
-    try:
-        # Initialize TF-IDF with matching dimensions
-        tfidf = TfidfVectorizer(max_features=vector_size)
-        
-        # Create a small corpus with the text to ensure proper vectorization
-        corpus = [text]
-        
-        # Fit and transform the text
-        sparse_vector = tfidf.fit_transform(corpus)
-        
-        # Convert to dense array and ensure fixed size
-        dense_vector = sparse_vector.toarray()[0]
-        
-        # Pad or truncate to match exact size
-        if len(dense_vector) < vector_size:
-            return np.pad(dense_vector, (0, vector_size - len(dense_vector))).tolist()
-        return dense_vector[:vector_size].tolist()
+from sentence_transformers import SentenceTransformer
 
+# Initialize the model ONCE at startup
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+def generate_vector_embedding(text):
+    """Generate semantic embeddings using Sentence Transformers"""
+    if not text:
+        return [0.0] * 384  # Default size for 'all-MiniLM-L6-v2'
+    try:
+        return model.encode(text).tolist()
     except Exception as e:
-        print(f"Error generating embedding: {e}")
-        return [0] * vector_size        
+        print(f"Embedding error: {str(e)}")
+        return [0.0] * 384         
