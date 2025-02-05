@@ -1642,7 +1642,7 @@ def extract_section_with_gpt(section_name: str, chunk_text: str) -> str:
     return response.choices[0].message.content
 
 @app.route('/upload', methods=['POST'])
-@require_api_key
+
 def upload_pdf():
     """
     API endpoint to upload PDF and extract sections
