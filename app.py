@@ -29,11 +29,12 @@ from nltk.tag import pos_tag
 from sklearn.feature_extraction.text import TfidfVectorizer
 import nltk
 from collections import Counter
+from flask_cors import CORS
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
-
+CORS(app)
 # Configuration
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  
