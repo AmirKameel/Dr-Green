@@ -822,22 +822,7 @@ def analyze_regulation_similarity(regulation_id):
         # Calculate similarity for each section
         results = []
         for section in sections:
-            section_text = section.get('full_text', '').strip()
-            
-            # Skip empty sections
-            if not section_text:
-                print(f"Skipping section {section.get('section_name')} due to missing text")
-                continue  
-
-            # Generate embedding for section
-            section_embedding = generate_vector_embedding(section_text)
-            if not section_embedding:
-                print(f"Skipping section {section.get('section_name')} due to empty embedding")
-                continue  
-                
-            # Attach embedding for similarity calculation
-            section['vector_embedding'] = section_embedding
-            similarity_scores = calculate_similarity2(section, profile_data)
+            similarity_scores = calculate_similarity(section, profile_data)
             
             # Only include sections with meaningful similarity
             if similarity_scores['total_score'] > 0.1:  # Minimum threshold
