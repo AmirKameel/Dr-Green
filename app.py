@@ -822,7 +822,7 @@ def analyze_regulation_similarity(regulation_id):
         # Calculate similarity for each section
         results = []
         for section in sections:
-            similarity_scores = calculate_similarity(section, profile_data)
+            similarity_scores = calculate_similarity2(section, profile_data)
             
             # Only include sections with meaningful similarity
             if similarity_scores['total_score'] > 0.1:  # Minimum threshold
