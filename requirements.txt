@@ -12,4 +12,4 @@ python-multipart
 werkzeug
 toml
 tenacity
-
+flask_cors
