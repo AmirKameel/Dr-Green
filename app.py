@@ -1730,6 +1730,96 @@ def upload_and_process_document(regulation_id):
 
 
 
+@app.route('/manuals/<int:manual_id>/upload-document', methods=['POST'])
+def upload_and_process_manual_document(manual_id):
+    """
+    Upload PDF document and process its sections into the manual
+    """
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+        
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+        
+    try:
+        # Create upload directory if it doesn't exist
+        upload_dir = 'uploads'
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # Save uploaded file with secure filename
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(upload_dir, filename)
+        file.save(filepath)
+        
+        # Validate manual exists before processing
+        manual = Manuals.get_manual(manual_id)
+        if not manual:
+            os.remove(filepath)
+            return jsonify({"error": "Manual not found"}), 404
+            
+        # Initialize processor and extract sections
+        processor = PDFProcessor(chunk_size=10, max_workers=4)
+        sections = processor.extract_sections(filepath)
+        
+        # Process sections with NLP features and store in database
+        successful_sections = []
+        failed_sections = []
+        
+        for section in sections:
+            try:
+                # Generate NLP features
+                full_text = section.get('content', '')
+                summary = generate_summary(full_text)
+                keywords = extract_keywords(full_text)
+                vector_embedding = generate_vector_embedding(full_text)
+                
+                # Create section in database
+                created_section = ManualSections.create_section(
+                    manual_id=manual_id,
+                    section_name=section.get('title', 'Untitled Section'),
+                    section_number=section.get('number'),
+                    parent_section_id=section.get('parent_id'),
+                    full_text=full_text,
+                    summary=summary,
+                    keywords=keywords,
+                    vector_embedding=vector_embedding
+                )
+                successful_sections.append(created_section)
+                
+            except Exception as section_error:
+                failed_sections.append({
+                    'section': section.get('title', 'Unknown Section'),
+                    'error': str(section_error)
+                })
+                
+        # Clean up uploaded file
+        os.remove(filepath)
+        
+        # Prepare response
+        response = {
+            'message': 'Document processed successfully',
+            'total_sections': len(sections),
+            'successful_sections': len(successful_sections),
+            'failed_sections': len(failed_sections),
+            'failures': failed_sections
+        }
+        
+        # Determine appropriate status code
+        if len(successful_sections) == 0:
+            return jsonify(response), 400
+        elif len(failed_sections) > 0:
+            return jsonify(response), 207  # Partial Content
+        else:
+            return jsonify(response), 200
+            
+    except Exception as e:
+        # Clean up file if it exists
+        if 'filepath' in locals() and os.path.exists(filepath):
+            os.remove(filepath)
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/extract_section', methods=['POST'])
 @require_api_key
 def extract_section():
