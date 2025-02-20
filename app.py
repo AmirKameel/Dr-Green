@@ -1192,7 +1192,7 @@ class PDFProcessor:
         """Extract text for a section with improved boundary detection."""
         section_text = ""
         
-        for i in range(start_page, min(start_page + expand_pages, len(doc))):
+        for i in range(start_page, min(start_page + expand_pages, len(doc)):
             page = doc.load_page(i)
             page_text = page.get_text("text")
             lines = page_text.split('\n')
@@ -1254,7 +1254,6 @@ class PDFProcessor:
             print(f"Error extracting sections: {str(e)}")
             return []
 
-    # Rest of the class implementation remains unchanged
     def process_sections(self, sections: List[Dict], regulation_id: int) -> Dict:
         """Process sections in batches with parallel processing"""
         self.total_sections = len(sections)
@@ -1316,96 +1315,57 @@ class PDFProcessor:
                     'vector_embedding': vector_embedding
                 }
 
-                try:
-                    # Try to find existing section
-                    existing_section = RegulationSections.find_section_by_name(
-                        regulation_id=regulation_id,
-                        section_name=section_name
-                    )
+                # Try to find existing section
+                existing_section = RegulationSections.find_section_by_name(
+                    regulation_id=regulation_id,
+                    section_name=section_name
+                )
 
-                    if existing_section:
-                        # Update existing section with merged content
-                        existing_text = existing_section.get('full_text', '')
-                        merged_text = self._merge_section_texts(existing_text, full_text)
-                        section_payload['full_text'] = merged_text
-                        
-                        # Regenerate features for merged text
-                        section_payload.update({
-                            'summary': generate_summary(merged_text),
-                            'keywords': extract_keywords(merged_text),
-                            'vector_embedding': generate_vector_embedding(merged_text)
-                        })
-                        
-                        section = RegulationSections.update_section(
-                            section_id=existing_section['id'],
-                            data=section_payload
-                        )
-                        action = 'updated'
-                    else:
-                        # Create new section
-                        section = RegulationSections.create_section(**section_payload)
-                        action = 'created'
-
-                    if not section or not isinstance(section, dict) or 'id' not in section:
-                        raise ValueError(f"Invalid section response: {section}")
-
-                    section_id = section['id']
-                    if not section_id:
-                        raise ValueError("Section ID is empty")
-
-                    batch_results['successful'].append({
-                        'section_name': section_name,
-                        'id': section_id,
-                        'action': action
+                # Save or update section
+                if existing_section:
+                    # Update existing section with merged content
+                    existing_text = existing_section.get('full_text', '')
+                    merged_text = self._merge_section_texts(existing_text, full_text)
+                    section_payload['full_text'] = merged_text
+                    
+                    # Regenerate features for merged text
+                    section_payload.update({
+                        'summary': generate_summary(merged_text),
+                        'keywords': extract_keywords(merged_text),
+                        'vector_embedding': generate_vector_embedding(merged_text)
                     })
+                    
+                    section = RegulationSections.update_section(
+                        section_id=existing_section['section_id'],  # Use section_id here
+                        data=section_payload
+                    )
+                    action = 'updated'
+                else:
+                    # Create new section
+                    section = RegulationSections.create_section(**section_payload)
+                    action = 'created'
 
-                    # Update progress
-                    with self._lock:
-                        self.processed_count += 1
-                        progress = (self.processed_count / self.total_sections) * 100
-                        print(f"Progress: {progress:.2f}% ({self.processed_count}/{self.total_sections})")
+                # Validate response
+                if not section or not isinstance(section, dict) or 'section_id' not in section:
+                    raise ValueError(f"Invalid section response: {section}")
 
-                except Exception as db_error:
-                    if 'duplicate key value violates unique constraint' in str(db_error):
-                        # Handle duplicate more gracefully
-                        print(f"Section {section_name} already exists - attempting update")
-                        try:
-                            # Try to update existing section
-                            existing = RegulationSections.find_section_by_name(
-                                regulation_id=regulation_id,
-                                section_name=section_name
-                            )
-                            if existing and existing.get('id'):
-                                section = RegulationSections.update_section(
-                                    section_id=existing['id'],
-                                    data=section_payload
-                                )
-                                batch_results['successful'].append({
-                                    'section_name': section_name,
-                                    'id': existing['id'],
-                                    'action': 'updated_duplicate'
-                                })
-                                continue
-                        except Exception as update_error:
-                            error_msg = f"Failed to update duplicate section {section_name}: {str(update_error)}"
-                            print(error_msg)
-                            batch_results['failed'].append({
-                                'section_name': section_name,
-                                'error': error_msg
-                            })
-                    else:
-                        error_msg = f"Database operation failed for section {section_name}: {str(db_error)}"
-                        print(error_msg)
-                        batch_results['failed'].append({
-                            'section_name': section_name,
-                            'error': error_msg
-                        })
+                batch_results['successful'].append({
+                    'section_name': section_name,
+                    'section_id': section['section_id'],  # Use section_id here
+                    'action': action
+                })
+
+                # Update progress
+                with self._lock:
+                    self.processed_count += 1
+                    progress = (self.processed_count / self.total_sections) * 100
+                    print(f"Progress: {progress:.2f}% ({self.processed_count}/{self.total_sections})")
 
             except Exception as e:
-                error_msg = f"Error processing section {section_data.get('section_name', 'Unknown')}: {str(e)}"
+                error_msg = f"Error processing section {section_name}: {str(e)}"
                 print(error_msg)
                 batch_results['failed'].append({
-                    'section_name': section_data.get('section_name', 'Unknown'),
+                    'section_name': section_name,
                     'error': error_msg
                 })
 
@@ -1428,6 +1388,7 @@ class PDFProcessor:
         all_paragraphs = sorted(existing_paragraphs.union(new_paragraphs))
         
         return '\n\n'.join(all_paragraphs)
+        
 def perform_audit(iosa_checklist: str, input_text: str) -> str:
     """
     Perform an audit using GPT to evaluate compliance with ISARPs
