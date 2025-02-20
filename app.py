@@ -1767,10 +1767,10 @@ def upload_and_process_manual_document(manual_id):
         successful_sections = []
         failed_sections = []
         
-        for section in sections:
+        for idx, section in enumerate(sections):
             try:
                 # Generate a unique section name
-                base_section_name = section.get('title') or 'Untitled Section'
+                base_section_name = section.get('title') or f'Section {idx + 1}'
                 section_name_counter[base_section_name] += 1
                 count = section_name_counter[base_section_name]
                 
@@ -1785,15 +1785,7 @@ def upload_and_process_manual_document(manual_id):
                 keywords = extract_keywords(full_text)
                 vector_embedding = generate_vector_embedding(full_text)
                 
-                # Add metadata about the section's location in document
-                section_metadata = {
-                    'original_title': base_section_name,
-                    'sequence_number': len(successful_sections) + 1,
-                    'page_number': section.get('page_number'),
-                    'processing_timestamp': datetime.utcnow().isoformat()
-                }
-                
-                # Create section in database
+                # Create section in database with only supported fields
                 created_section = ManualSections.create_section(
                     manual_id=manual_id,
                     section_name=final_section_name,
@@ -1802,12 +1794,11 @@ def upload_and_process_manual_document(manual_id):
                     full_text=full_text,
                     summary=summary,
                     keywords=keywords,
-                    vector_embedding=vector_embedding,
-                    metadata=section_metadata
+                    vector_embedding=vector_embedding
                 )
+                
                 successful_sections.append({
                     'section_name': final_section_name,
-                    'original_title': base_section_name,
                     'id': created_section.get('id')
                 })
                 
