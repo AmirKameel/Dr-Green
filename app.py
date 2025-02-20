@@ -1090,6 +1090,8 @@ class PDFProcessor:
         self.processed_count = 0
         self.total_sections = 0
         self._lock = threading.Lock()
+        self.section_counter = defaultdict(int)
+
         
         # Define valid page ranges for IOSA sections
         self.page_ranges = {
