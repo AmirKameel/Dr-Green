@@ -1246,73 +1246,113 @@ class PDFProcessor:
         return sections
 
     def extract_sections(self, pdf_path: str, expand_pages: int = 7) -> List[Dict]:
-        """Extract sections from PDF with support for different document types."""
+        """
+        Extract sections from PDF with improved error handling
+        """
+        sections = []
+        seen_sections = defaultdict(int)
+
         try:
             doc = fitz.open(pdf_path)
-            sections = []
-            
-            # Detect document type
-            doc_type = self.detect_document_type(doc)
-            
-            if doc_type == 'ecar':
-                # Use ECAR specific parsing
-                sections = self.parse_ecar_sections(doc)
-            else:
-                # Process TOC entries
-                toc = doc.get_toc()
-                seen_headers = set()
-                
-                for level, title, page in toc:
-                    try:
-                        section_text = ""
-                        for i in range(page - 1, min(page - 1 + expand_pages + 1, len(doc))):
-                            page_text = doc.load_page(i).get_text("text")
-                            if not page_text:
-                                page_text = doc.load_page(i).get_text("blocks")
-                            section_text += page_text if page_text else ""
+            toc = doc.get_toc()
 
-                        sections.append({
-                            "section_name": title,
-                            "section_number": str(level),
-                            "full_text": section_text.strip(),
-                            "subsections": self.parse_small_subsections(section_text)
-                        })
-                        seen_headers.add(title)
+            # Process TOC entries
+            for level, title, page in toc:
+                try:
+                    section_text = ""
+                    success = False
+                    retry_count = 0
 
-                    except Exception as e:
-                        print(f"Error processing section {title}: {str(e)}")
+                    while not success and retry_count < self.max_retries:
+                        try:
+                            for i in range(page - 1, min(page - 1 + expand_pages + 1, len(doc))):
+                                page_text = self._extract_page_text(doc, i)
+                                section_text += page_text
 
-                # Find additional sections using regex patterns
-                pattern = r'\b(ORG \d+(\.\d+){1,5})\b'
-                for page_num in range(len(doc)):
-                    page = doc.load_page(page_num)
-                    page_text = page.get_text("text")
+                            success = True
+                        except Exception as e:
+                            retry_count += 1
+                            if retry_count < self.max_retries:
+                                time.sleep(2 ** retry_count)
+                            else:
+                                print(f"Failed to extract section {title} after {self.max_retries} attempts")
+                                section_text = f"Error extracting text: {str(e)}"
+
+                    # Store the original title before modifying it
+                    base_title = title  
+                    seen_sections[base_title] += 1
+                    if seen_sections[base_title] > 1:
+                        title = f"{base_title} (Version {seen_sections[base_title]})"
+
+                    sections.append({
+                        "section_name": title,
+                        "section_number": str(level),
+                        "full_text": section_text.strip(),
+                        "original_title": base_title,  # Ensure original title is stored
+                        "extraction_status": "success" if success else "partial_failure"
+                    })
+
+                except Exception as e:
+                    print(f"Error processing section {title}: {str(e)}")
+                    sections.append({
+                        "section_name": title,
+                        "section_number": str(level),
+                        "full_text": f"Error processing section: {str(e)}",
+                        "original_title": title,  # Store even in error cases
+                        "extraction_status": "failure"
+                    })
+
+            # Process regex patterns with similar retry logic
+            pattern = r'\b(ORG \d+(\.\d+){1,5})\b'
+            for page_num in range(len(doc)):
+                try:
+                    page_text = self._extract_page_text(doc, page_num)
                     headers = re.findall(pattern, page_text)
 
                     for header in headers:
-                        header_title = header[0]
-                        if header_title not in seen_headers:
-                            section_text = ""
-                            for i in range(page_num, min(page_num + expand_pages + 1, len(doc))):
-                                page_text = doc.load_page(i).get_text("text")
-                                if not page_text:
-                                    page_text = doc.load_page(i).get_text("blocks")
-                                section_text += page_text if page_text else ""
+                        base_header_title = header[0]  # Store unmodified header
+                        seen_sections[base_header_title] += 1
+                        header_title = base_header_title
 
-                            sections.append({
-                                "section_name": header_title,
-                                "section_number": str(header_title.count('.') + 1),
-                                "full_text": section_text.strip(),
-                                "subsections": self.parse_small_subsections(section_text)
-                            })
-                            seen_headers.add(header_title)
+                        if seen_sections[base_header_title] > 1:
+                            header_title = f"{base_header_title} (Version {seen_sections[base_header_title]})"
 
-            doc.close()
+                        section_text = ""
+                        success = False
+                        retry_count = 0
+
+                        while not success and retry_count < self.max_retries:
+                            try:
+                                for i in range(page_num, min(page_num + expand_pages + 1, len(doc))):
+                                    page_text = self._extract_page_text(doc, i)
+                                    section_text += page_text
+                                success = True
+                            except Exception as e:
+                                retry_count += 1
+                                if retry_count < self.max_retries:
+                                    time.sleep(2 ** retry_count)
+                                else:
+                                    section_text = f"Error extracting text: {str(e)}"
+
+                        sections.append({
+                            "section_name": header_title,
+                            "section_number": str(base_header_title.count('.') + 1),
+                            "full_text": section_text.strip(),
+                            "original_title": base_header_title,  # Ensure original title is stored
+                            "extraction_status": "success" if success else "partial_failure"
+                        })
+
+                except Exception as e:
+                    print(f"Error processing page {page_num}: {str(e)}")
+
             return sections
 
         except Exception as e:
             print(f"Error extracting sections: {str(e)}")
             return []
+        finally:
+            if 'doc' in locals():
+                doc.close()
 
     def _process_batch(self, batch: List[Dict], regulation_id: int) -> Dict:
         """
