@@ -1770,7 +1770,7 @@ def upload_and_process_manual_document(manual_id):
         for idx, section in enumerate(sections):
             try:
                 # Generate a unique section name
-                base_section_name = section.get('title') or f'Section {idx + 1}'
+                base_section_name = section.get('section_name') or f'Section {idx + 1}'
                 section_name_counter[base_section_name] += 1
                 count = section_name_counter[base_section_name]
                 
@@ -1779,18 +1779,42 @@ def upload_and_process_manual_document(manual_id):
                     f"{base_section_name} ({count})" if count > 1 else base_section_name
                 )
                 
+                # Get the full text from the section
+                full_text = section.get('full_text', '').strip()
+                if not full_text:
+                    raise ValueError("Empty section content")
+
                 # Generate NLP features
-                full_text = section.get('content', '')
-                summary = generate_summary(full_text)
-                keywords = extract_keywords(full_text)
-                vector_embedding = generate_vector_embedding(full_text)
+                try:
+                    summary = generate_summary(full_text)
+                except Exception as e:
+                    print(f"Error generating summary: {str(e)}")
+                    summary = "Summary generation failed"
+
+                try:
+                    keywords = extract_keywords(full_text)
+                except Exception as e:
+                    print(f"Error extracting keywords: {str(e)}")
+                    keywords = []
+
+                try:
+                    vector_embedding = generate_vector_embedding(full_text)
+                except Exception as e:
+                    print(f"Error generating vector embedding: {str(e)}")
+                    vector_embedding = None
+
+                # Print debug information
+                print(f"Processing section: {final_section_name}")
+                print(f"Text length: {len(full_text)}")
+                print(f"Keywords count: {len(keywords)}")
+                print(f"Has vector embedding: {vector_embedding is not None}")
                 
-                # Create section in database with only supported fields
+                # Create section in database with proper mapping
                 created_section = ManualSections.create_section(
                     manual_id=manual_id,
                     section_name=final_section_name,
-                    section_number=section.get('number'),
-                    parent_section_id=section.get('parent_id'),
+                    section_number=section.get('section_number'),
+                    parent_section_id=None,  # Set this if you have hierarchy information
                     full_text=full_text,
                     summary=summary,
                     keywords=keywords,
@@ -1799,10 +1823,15 @@ def upload_and_process_manual_document(manual_id):
                 
                 successful_sections.append({
                     'section_name': final_section_name,
-                    'id': created_section.get('id')
+                    'id': created_section.get('id'),
+                    'text_length': len(full_text),
+                    'has_summary': bool(summary),
+                    'keywords_count': len(keywords),
+                    'has_embedding': vector_embedding is not None
                 })
                 
             except Exception as section_error:
+                print(f"Error processing section: {str(section_error)}")
                 failed_sections.append({
                     'section': base_section_name,
                     'error': str(section_error)
