@@ -1084,7 +1084,7 @@ import time
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 class PDFProcessor:
-    def _init_(self, chunk_size=5, max_workers=2, max_retries=3):
+    def __init__(self, chunk_size=5, max_workers=2, max_retries=3):
         self.chunk_size = chunk_size  # Reduced chunk size for better stability
         self.max_workers = max_workers  # Reduced workers to prevent overload
         self.max_retries = max_retries
