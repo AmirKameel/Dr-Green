@@ -1084,19 +1084,15 @@ import time
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 class PDFProcessor:
-    def __init__(self, chunk_size=5, max_workers=2, max_retries=3):
-        self.chunk_size = chunk_size  # Reduced chunk size for better stability
-        self.max_workers = max_workers  # Reduced workers to prevent overload
-        self.max_retries = max_retries
+    def __init__(self, chunk_size=10, max_workers=4):
+        self.chunk_size = chunk_size
+        self.max_workers = max_workers
         self.processed_count = 0
         self.total_sections = 0
         self._lock = threading.Lock()
-        self.section_counter = defaultdict(int)
-
-
-    def get_valid_page_range(self, section_type):
-        """Return the valid page range for a given section type."""
-        ranges = {
+        
+        # Define valid page ranges for IOSA sections
+        self.page_ranges = {
             'ORG': (52, 114),
             'FLT': (114, 299),
             'DSP': (299, 403),
@@ -1106,7 +1102,6 @@ class PDFProcessor:
             'CGO': (620, 656),
             'SEC': (656, 700)
         }
-        return ranges.get(section_type)
 
     def detect_document_type(self, doc):
         """Detect if the document is IOSA/ECAR/Other type."""
@@ -1117,7 +1112,7 @@ class PDFProcessor:
             return 'iosa'
         return 'other'
 
-    def is_valid_header(self, line, page_text, line_index, lines, page, page_num):
+    def is_valid_header(self, line, page, page_num):
         """Validate if a line is a genuine header."""
         line = line.strip()
         if not line:
@@ -1135,18 +1130,19 @@ class PDFProcessor:
         if not match:
             return False
 
+        # Validate page range for IOSA sections
         section_type = match.group(1)
-        valid_range = self.get_valid_page_range(section_type)
+        valid_range = self.page_ranges.get(section_type)
         if not valid_range or not (valid_range[0] <= page_num + 1 <= valid_range[1]):
             return False
 
+        # Check for bold text
         blocks = page.get_text("dict")["blocks"]
         for block in blocks:
             for line_block in block.get("lines", []):
                 for span in line_block.get("spans", []):
-                    span_text = span.get("text", "").strip()
-                    if span_text == line:
-                        if span.get("flags", 0) & 2**2:  # Check for bold flag
+                    if span.get("text", "").strip() == line:
+                        if span.get("flags", 0) & 2**2:  # Bold flag
                             return True
         return False
 
@@ -1171,12 +1167,10 @@ class PDFProcessor:
                 match = re.match(section_pattern, line)
                 if match:
                     if current_section:
-                        text_content = '\n'.join(current_text)
                         sections.append({
                             "section_name": current_section,
-                            "section_number": "1",
-                            "full_text": text_content,
-                            "subsections": self.parse_small_subsections(text_content)
+                            "section_number": current_section.split()[0],
+                            "full_text": '\n'.join(current_text).strip()
                         })
                     
                     current_section = line
@@ -1184,175 +1178,82 @@ class PDFProcessor:
                 else:
                     current_text.append(line)
         
+        # Add final section
         if current_section:
-            text_content = '\n'.join(current_text)
             sections.append({
                 "section_name": current_section,
-                "section_number": "1",
-                "full_text": text_content,
-                "subsections": self.parse_small_subsections(text_content)
+                "section_number": current_section.split()[0],
+                "full_text": '\n'.join(current_text).strip()
             })
         
         return sections
 
-    def parse_small_subsections(self, text):
-        """Parse subsections with support for multiple formats and nested structures."""
-        patterns = [
-            # Main numbered sections (1, 2, 1.1, 1.2.3)
-            r'(?:^|\n)(\d+(?:\.\d+)*)\s+(.*?)(?=(?:\n\d+(?:\.\d+)*\s+|\n[a-zA-Z]\)|\n[ivxlcIVXLC]+\)|\Z))',
+    def extract_section_text(self, doc, start_page, header, expand_pages=8):
+        """Extract text for a section with improved boundary detection."""
+        section_text = ""
+        
+        for i in range(start_page, min(start_page + expand_pages, len(doc))):
+            page = doc.load_page(i)
+            page_text = page.get_text("text")
+            lines = page_text.split('\n')
             
-            # Alphabetic subsections (a), b), A), B))
-            r'(?:^|\n)([a-zA-Z]\))\s+(.*?)(?=(?:\n[a-zA-Z]\)|\n\d+(?:\.\d+)*\s+|\n[ivxlcIVXLC]+\)|\Z))',
-            
-            # Roman numeral subsections (i), ii), I), II))
-            r'(?:^|\n)([ivxlcIVXLC]+\))\s+(.*?)(?=(?:\n[ivxlcIVXLC]+\)|\n\d+(?:\.\d+)*\s+|\n[a-zA-Z]\)|\Z))'
-        ]
-        
-        sections = []
-        remaining_text = text
-        
-        for pattern in patterns:
-            matches = re.finditer(pattern, remaining_text, re.MULTILINE | re.DOTALL)
-            for match in matches:
-                section_number = match.group(1).strip()
-                content = match.group(2).strip()
+            for line_index, line in enumerate(lines):
+                if self.is_valid_header(line, page, i) and header not in line:
+                    return section_text.strip()
+                section_text += line + "\n"
                 
-                if not content:
-                    continue
-                    
-                subsections = []
-                for nested_pattern in patterns:
-                    nested_matches = re.finditer(nested_pattern, content, re.MULTILINE)
-                    for nested_match in nested_matches:
-                        nested_number = nested_match.group(1).strip()
-                        nested_content = nested_match.group(2).strip()
-                        if nested_content:
-                            subsections.append({
-                                'title': nested_number,
-                                'content': nested_content,
-                                'type': 'nested'
-                            })
-                            content = content.replace(f"{nested_number} {nested_content}", "").strip()
-                
-                sections.append({
-                    'title': section_number,
-                    'content': content,
-                    'subsections': subsections if subsections else None,
-                    'type': 'main'
-                })
-                
-                remaining_text = remaining_text.replace(f"{section_number} {match.group(2)}", "").strip()
-        
-        return sections
+        return section_text.strip()
 
-    def extract_sections(self, pdf_path: str, expand_pages: int = 7) -> List[Dict]:
-        """
-        Extract sections from PDF with improved error handling
-        """
-        sections = []
-        seen_sections = defaultdict(int)
-
+    def extract_sections(self, pdf_path: str, expand_pages: int = 8) -> List[Dict]:
+        """Extract sections from PDF with support for different document types."""
         try:
             doc = fitz.open(pdf_path)
-            toc = doc.get_toc()
-
-            # Process TOC entries
-            for level, title, page in toc:
-                try:
-                    section_text = ""
-                    success = False
-                    retry_count = 0
-
-                    while not success and retry_count < self.max_retries:
-                        try:
-                            for i in range(page - 1, min(page - 1 + expand_pages + 1, len(doc))):
-                                page_text = self._extract_page_text(doc, i)
-                                section_text += page_text
-
-                            success = True
-                        except Exception as e:
-                            retry_count += 1
-                            if retry_count < self.max_retries:
-                                time.sleep(2 ** retry_count)
-                            else:
-                                print(f"Failed to extract section {title} after {self.max_retries} attempts")
-                                section_text = f"Error extracting text: {str(e)}"
-
-                    # Store the original title before modifying it
-                    base_title = title  
-                    seen_sections[base_title] += 1
-                    if seen_sections[base_title] > 1:
-                        title = f"{base_title} (Version {seen_sections[base_title]})"
-
+            sections = []
+            
+            # Detect document type
+            doc_type = self.detect_document_type(doc)
+            
+            if doc_type == 'ecar':
+                sections = self.parse_ecar_sections(doc)
+            else:
+                # Process TOC sections
+                toc = doc.get_toc()
+                seen_headers = set()
+                
+                for level, title, page in toc:
+                    section_text = self.extract_section_text(doc, page - 1, title, expand_pages)
                     sections.append({
                         "section_name": title,
                         "section_number": str(level),
-                        "full_text": section_text.strip(),
-                        "original_title": base_title,  # Ensure original title is stored
-                        "extraction_status": "success" if success else "partial_failure"
+                        "full_text": section_text
                     })
+                    seen_headers.add(title)
 
-                except Exception as e:
-                    print(f"Error processing section {title}: {str(e)}")
-                    sections.append({
-                        "section_name": title,
-                        "section_number": str(level),
-                        "full_text": f"Error processing section: {str(e)}",
-                        "original_title": title,  # Store even in error cases
-                        "extraction_status": "failure"
-                    })
+                # Find additional sections
+                for page_num in range(len(doc)):
+                    page = doc.load_page(page_num)
+                    page_text = page.get_text("text")
+                    lines = page_text.split('\n')
+                    
+                    for line in lines:
+                        if self.is_valid_header(line, page, page_num):
+                            header = line.strip()
+                            if header not in seen_headers:
+                                section_text = self.extract_section_text(doc, page_num, header, expand_pages)
+                                sections.append({
+                                    "section_name": header,
+                                    "section_number": str(header.count('.') + 1),
+                                    "full_text": section_text
+                                })
+                                seen_headers.add(header)
 
-            # Process regex patterns with similar retry logic
-            pattern = r'\b(ORG \d+(\.\d+){1,5})\b'
-            for page_num in range(len(doc)):
-                try:
-                    page_text = self._extract_page_text(doc, page_num)
-                    headers = re.findall(pattern, page_text)
-
-                    for header in headers:
-                        base_header_title = header[0]  # Store unmodified header
-                        seen_sections[base_header_title] += 1
-                        header_title = base_header_title
-
-                        if seen_sections[base_header_title] > 1:
-                            header_title = f"{base_header_title} (Version {seen_sections[base_header_title]})"
-
-                        section_text = ""
-                        success = False
-                        retry_count = 0
-
-                        while not success and retry_count < self.max_retries:
-                            try:
-                                for i in range(page_num, min(page_num + expand_pages + 1, len(doc))):
-                                    page_text = self._extract_page_text(doc, i)
-                                    section_text += page_text
-                                success = True
-                            except Exception as e:
-                                retry_count += 1
-                                if retry_count < self.max_retries:
-                                    time.sleep(2 ** retry_count)
-                                else:
-                                    section_text = f"Error extracting text: {str(e)}"
-
-                        sections.append({
-                            "section_name": header_title,
-                            "section_number": str(base_header_title.count('.') + 1),
-                            "full_text": section_text.strip(),
-                            "original_title": base_header_title,  # Ensure original title is stored
-                            "extraction_status": "success" if success else "partial_failure"
-                        })
-
-                except Exception as e:
-                    print(f"Error processing page {page_num}: {str(e)}")
-
+            doc.close()
             return sections
 
         except Exception as e:
             print(f"Error extracting sections: {str(e)}")
             return []
-        finally:
-            if 'doc' in locals():
-                doc.close()
+
 
     def _process_batch(self, batch: List[Dict], regulation_id: int) -> Dict:
         """
