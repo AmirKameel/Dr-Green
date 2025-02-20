@@ -1762,34 +1762,58 @@ def upload_and_process_manual_document(manual_id):
         processor = PDFProcessor(chunk_size=10, max_workers=4)
         sections = processor.extract_sections(filepath)
         
-        # Process sections with NLP features and store in database
+        # Keep track of section names to handle duplicates
+        section_name_counter = defaultdict(int)
         successful_sections = []
         failed_sections = []
         
         for section in sections:
             try:
+                # Generate a unique section name
+                base_section_name = section.get('title') or 'Untitled Section'
+                section_name_counter[base_section_name] += 1
+                count = section_name_counter[base_section_name]
+                
+                # Add a unique identifier if this name has been used before
+                final_section_name = (
+                    f"{base_section_name} ({count})" if count > 1 else base_section_name
+                )
+                
                 # Generate NLP features
                 full_text = section.get('content', '')
                 summary = generate_summary(full_text)
                 keywords = extract_keywords(full_text)
                 vector_embedding = generate_vector_embedding(full_text)
                 
+                # Add metadata about the section's location in document
+                section_metadata = {
+                    'original_title': base_section_name,
+                    'sequence_number': len(successful_sections) + 1,
+                    'page_number': section.get('page_number'),
+                    'processing_timestamp': datetime.utcnow().isoformat()
+                }
+                
                 # Create section in database
                 created_section = ManualSections.create_section(
                     manual_id=manual_id,
-                    section_name=section.get('title', 'Untitled Section'),
+                    section_name=final_section_name,
                     section_number=section.get('number'),
                     parent_section_id=section.get('parent_id'),
                     full_text=full_text,
                     summary=summary,
                     keywords=keywords,
-                    vector_embedding=vector_embedding
+                    vector_embedding=vector_embedding,
+                    metadata=section_metadata
                 )
-                successful_sections.append(created_section)
+                successful_sections.append({
+                    'section_name': final_section_name,
+                    'original_title': base_section_name,
+                    'id': created_section.get('id')
+                })
                 
             except Exception as section_error:
                 failed_sections.append({
-                    'section': section.get('title', 'Unknown Section'),
+                    'section': base_section_name,
                     'error': str(section_error)
                 })
                 
@@ -1802,6 +1826,7 @@ def upload_and_process_manual_document(manual_id):
             'total_sections': len(sections),
             'successful_sections': len(successful_sections),
             'failed_sections': len(failed_sections),
+            'processed_sections': successful_sections,
             'failures': failed_sections
         }
         
