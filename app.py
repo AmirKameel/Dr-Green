@@ -1284,7 +1284,7 @@ class PDFProcessor:
 
     def _process_batch(self, batch: List[Dict], regulation_id: int) -> Dict:
         """
-        Process a batch of sections with duplicate handling
+        Process a batch of sections with improved duplicate handling
         """
         batch_results = {
             'successful': [],
@@ -1295,63 +1295,139 @@ class PDFProcessor:
             try:
                 # Process text and generate features
                 full_text = section_data.get('full_text', '')
+                section_name = section_data.get('section_name', '')
+
+                if not full_text or not section_name:
+                    raise ValueError("Empty section text or missing section name")
+
+                # Generate features
                 summary = generate_summary(full_text)
                 keywords = extract_keywords(full_text)
                 vector_embedding = generate_vector_embedding(full_text)
 
-                # Try to find existing section
-                existing_section = RegulationSections.find_section_by_name(
-                    regulation_id=regulation_id,
-                    section_name=section_data['section_name']
-                )
+                # Prepare section data
+                section_payload = {
+                    'regulation_id': regulation_id,
+                    'section_name': section_name,
+                    'section_number': section_data.get('section_number'),
+                    'full_text': full_text,
+                    'summary': summary,
+                    'keywords': keywords,
+                    'vector_embedding': vector_embedding
+                }
 
-                if existing_section:
-                    # Update existing section
-                    section = RegulationSections.update_section(
-                        section_id=existing_section['id'],
-                        data={
-                            'section_number': section_data.get('section_number'),
-                            'full_text': full_text,
-                            'summary': summary,
-                            'keywords': keywords,
-                            'vector_embedding': vector_embedding
-                        }
-                    )
-                    action = 'updated'
-                else:
-                    # Create new section
-                    section = RegulationSections.create_section(
+                try:
+                    # Try to find existing section
+                    existing_section = RegulationSections.find_section_by_name(
                         regulation_id=regulation_id,
-                        section_name=section_data['section_name'],
-                        section_number=section_data.get('section_number'),
-                        full_text=full_text,
-                        summary=summary,
-                        keywords=keywords,
-                        vector_embedding=vector_embedding
+                        section_name=section_name
                     )
-                    action = 'created'
 
-                batch_results['successful'].append({
-                    'section_name': section_data['section_name'],
-                    'id': section.get('id'),
-                    'action': action
-                })
+                    if existing_section:
+                        # Update existing section with merged content
+                        existing_text = existing_section.get('full_text', '')
+                        merged_text = self._merge_section_texts(existing_text, full_text)
+                        section_payload['full_text'] = merged_text
+                        
+                        # Regenerate features for merged text
+                        section_payload.update({
+                            'summary': generate_summary(merged_text),
+                            'keywords': extract_keywords(merged_text),
+                            'vector_embedding': generate_vector_embedding(merged_text)
+                        })
+                        
+                        section = RegulationSections.update_section(
+                            section_id=existing_section['id'],
+                            data=section_payload
+                        )
+                        action = 'updated'
+                    else:
+                        # Create new section
+                        section = RegulationSections.create_section(**section_payload)
+                        action = 'created'
 
-                # Update progress
-                with self._lock:
-                    self.processed_count += 1
-                    progress = (self.processed_count / self.total_sections) * 100
-                    print(f"Progress: {progress:.2f}% ({self.processed_count}/{self.total_sections})")
+                    if not section or not isinstance(section, dict) or 'id' not in section:
+                        raise ValueError(f"Invalid section response: {section}")
+
+                    section_id = section['id']
+                    if not section_id:
+                        raise ValueError("Section ID is empty")
+
+                    batch_results['successful'].append({
+                        'section_name': section_name,
+                        'id': section_id,
+                        'action': action
+                    })
+
+                    # Update progress
+                    with self._lock:
+                        self.processed_count += 1
+                        progress = (self.processed_count / self.total_sections) * 100
+                        print(f"Progress: {progress:.2f}% ({self.processed_count}/{self.total_sections})")
+
+                except Exception as db_error:
+                    if 'duplicate key value violates unique constraint' in str(db_error):
+                        # Handle duplicate more gracefully
+                        print(f"Section {section_name} already exists - attempting update")
+                        try:
+                            # Try to update existing section
+                            existing = RegulationSections.find_section_by_name(
+                                regulation_id=regulation_id,
+                                section_name=section_name
+                            )
+                            if existing and existing.get('id'):
+                                section = RegulationSections.update_section(
+                                    section_id=existing['id'],
+                                    data=section_payload
+                                )
+                                batch_results['successful'].append({
+                                    'section_name': section_name,
+                                    'id': existing['id'],
+                                    'action': 'updated_duplicate'
+                                })
+                                continue
+                        except Exception as update_error:
+                            error_msg = f"Failed to update duplicate section {section_name}: {str(update_error)}"
+                            print(error_msg)
+                            batch_results['failed'].append({
+                                'section_name': section_name,
+                                'error': error_msg
+                            })
+                    else:
+                        error_msg = f"Database operation failed for section {section_name}: {str(db_error)}"
+                        print(error_msg)
+                        batch_results['failed'].append({
+                            'section_name': section_name,
+                            'error': error_msg
+                        })
 
             except Exception as e:
-                print(f"Error processing section {section_data.get('section_name')}: {str(e)}")
+                error_msg = f"Error processing section {section_data.get('section_name', 'Unknown')}: {str(e)}"
+                print(error_msg)
                 batch_results['failed'].append({
-                    'section_name': section_data.get('section_name'),
-                    'error': str(e)
+                    'section_name': section_data.get('section_name', 'Unknown'),
+                    'error': error_msg
                 })
 
         return batch_results
 
+    def _merge_section_texts(self, existing_text: str, new_text: str) -> str:
+        """
+        Merge existing and new section texts intelligently
+        """
+        if not existing_text:
+            return new_text
+        if not new_text:
+            return existing_text
+            
+        # Remove duplicate content
+        existing_paragraphs = set(p.strip() for p in existing_text.split('\n') if p.strip())
+        new_paragraphs = set(p.strip() for p in new_text.split('\n') if p.strip())
+        
+        # Combine unique paragraphs
+        all_paragraphs = sorted(existing_paragraphs.union(new_paragraphs))
+        
+        return '\n\n'.join(all_paragraphs)
 def perform_audit(iosa_checklist: str, input_text: str) -> str:
     """
     Perform an audit using GPT to evaluate compliance with ISARPs
