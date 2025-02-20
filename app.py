@@ -1090,8 +1090,6 @@ class PDFProcessor:
         self.processed_count = 0
         self.total_sections = 0
         self._lock = threading.Lock()
-        self.section_counter = defaultdict(int)
-
         
         # Define valid page ranges for IOSA sections
         self.page_ranges = {
@@ -1256,93 +1254,9 @@ class PDFProcessor:
             print(f"Error extracting sections: {str(e)}")
             return []
 
-
-    def _process_batch(self, batch: List[Dict], regulation_id: int) -> Dict:
-        """
-        Process a batch of sections with improved error handling
-        """
-        batch_results = {
-            'successful': [],
-            'failed': [],
-            'partial': []
-        }
-
-        for section_data in batch:
-            try:
-                # Skip processing if extraction failed
-                if section_data.get('extraction_status') == 'failure':
-                    batch_results['failed'].append({
-                        'section_name': section_data.get('section_name'),
-                        'error': 'Text extraction failed'
-                    })
-                    continue
-
-                # Process text and generate features
-                full_text = section_data.get('full_text', '')
-                if full_text.startswith('Error'):
-                    batch_results['failed'].append({
-                        'section_name': section_data.get('section_name'),
-                        'error': full_text
-                    })
-                    continue
-
-                # Add delay between processing to prevent overload
-                time.sleep(0.1)
-
-                summary = generate_summary(full_text)
-                keywords = extract_keywords(full_text)
-                vector_embedding = generate_vector_embedding(full_text)
-
-                with self._lock:
-                    self.section_counter[section_data['original_title']] += 1
-                    current_count = self.section_counter[section_data['original_title']]
-
-                final_section_name = section_data['section_name']
-
-                section = RegulationSections.create_section(
-                    regulation_id=regulation_id,
-                    section_name=final_section_name,
-                    section_number=section_data.get('section_number'),
-                    full_text=full_text,
-                    summary=summary,
-                    keywords=keywords,
-                    vector_embedding=vector_embedding,
-                    original_title=section_data['original_title']
-                )
-
-                status = 'successful'
-                if section_data.get('extraction_status') == 'partial_failure':
-                    status = 'partial'
-                    batch_results['partial'].append({
-                        'section_name': final_section_name,
-                        'id': section.get('id'),
-                        'message': 'Partial content extracted'
-                    })
-                else:
-                    batch_results['successful'].append({
-                        'section_name': final_section_name,
-                        'id': section.get('id'),
-                        'action': 'created'
-                    })
-
-                with self._lock:
-                    self.processed_count += 1
-                    progress = (self.processed_count / self.total_sections) * 100
-                    print(f"Progress: {progress:.2f}% ({self.processed_count}/{self.total_sections}) - Status: {status}")
-
-            except Exception as e:
-                print(f"Error processing section {section_data.get('section_name')}: {str(e)}")
-                batch_results['failed'].append({
-                    'section_name': section_data.get('section_name'),
-                    'error': str(e)
-                })
-
-        return batch_results
-
+    # Rest of the class implementation remains unchanged
     def process_sections(self, sections: List[Dict], regulation_id: int) -> Dict:
-        """
-        Process sections in batches with parallel processing
-        """
+        """Process sections in batches with parallel processing"""
         self.total_sections = len(sections)
         self.processed_count = 0
         results = {
@@ -1367,6 +1281,76 @@ class PDFProcessor:
                 results['total_processed'] += len(batch_result['successful'])
 
         return results
+
+    def _process_batch(self, batch: List[Dict], regulation_id: int) -> Dict:
+        """
+        Process a batch of sections with duplicate handling
+        """
+        batch_results = {
+            'successful': [],
+            'failed': []
+        }
+
+        for section_data in batch:
+            try:
+                # Process text and generate features
+                full_text = section_data.get('full_text', '')
+                summary = generate_summary(full_text)
+                keywords = extract_keywords(full_text)
+                vector_embedding = generate_vector_embedding(full_text)
+
+                # Try to find existing section
+                existing_section = RegulationSections.find_section_by_name(
+                    regulation_id=regulation_id,
+                    section_name=section_data['section_name']
+                )
+
+                if existing_section:
+                    # Update existing section
+                    section = RegulationSections.update_section(
+                        section_id=existing_section['id'],
+                        data={
+                            'section_number': section_data.get('section_number'),
+                            'full_text': full_text,
+                            'summary': summary,
+                            'keywords': keywords,
+                            'vector_embedding': vector_embedding
+                        }
+                    )
+                    action = 'updated'
+                else:
+                    # Create new section
+                    section = RegulationSections.create_section(
+                        regulation_id=regulation_id,
+                        section_name=section_data['section_name'],
+                        section_number=section_data.get('section_number'),
+                        full_text=full_text,
+                        summary=summary,
+                        keywords=keywords,
+                        vector_embedding=vector_embedding
+                    )
+                    action = 'created'
+
+                batch_results['successful'].append({
+                    'section_name': section_data['section_name'],
+                    'id': section.get('id'),
+                    'action': action
+                })
+
+                # Update progress
+                with self._lock:
+                    self.processed_count += 1
+                    progress = (self.processed_count / self.total_sections) * 100
+                    print(f"Progress: {progress:.2f}% ({self.processed_count}/{self.total_sections})")
+
+            except Exception as e:
+                print(f"Error processing section {section_data.get('section_name')}: {str(e)}")
+                batch_results['failed'].append({
+                    'section_name': section_data.get('section_name'),
+                    'error': str(e)
+                })
+
+        return batch_results
 
 def perform_audit(iosa_checklist: str, input_text: str) -> str:
     """
