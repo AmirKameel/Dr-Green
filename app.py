@@ -1192,7 +1192,7 @@ class PDFProcessor:
         """Extract text for a section with improved boundary detection."""
         section_text = ""
         
-        for i in range(start_page, min(start_page + expand_pages, len(doc)):
+        for i in range(start_page, min(start_page + expand_pages, len(doc))):
             page = doc.load_page(i)
             page_text = page.get_text("text")
             lines = page_text.split('\n')
@@ -1254,6 +1254,7 @@ class PDFProcessor:
             print(f"Error extracting sections: {str(e)}")
             return []
 
+    # Rest of the class implementation remains unchanged
     def process_sections(self, sections: List[Dict], regulation_id: int) -> Dict:
         """Process sections in batches with parallel processing"""
         self.total_sections = len(sections)
