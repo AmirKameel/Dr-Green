@@ -551,6 +551,7 @@ def get_compliance_report(report_id):
 def create_compliance_report():
     data = request.json
     report = ComplianceReports.create_report(
+        user_id=data['user_id'],
         regulation_section_id=data['regulation_section_id'],
         manual_section_id=data['manual_section_id'],
         compliance_score=data['compliance_score'],
