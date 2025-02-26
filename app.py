@@ -1390,7 +1390,7 @@ class PDFProcessor:
         
         return '\n\n'.join(all_paragraphs)
         
-def perform_audit(iosa_checklist: str, input_text: str) -> str:
+def perform_audit(iosa_checklist: str, input_text: str, user_id: str) -> str:
     """
     Perform an audit using GPT to evaluate compliance with ISARPs
     
