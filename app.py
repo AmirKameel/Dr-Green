@@ -882,7 +882,7 @@ class FlexibleAuditProcessor:
         self.regulation_sections_db = regulation_sections_db
         self.manual_sections_db = manual_sections_db
 
-    def process_and_store_audit(self, 
+    def process_and_store_audit(self, user_id: str,
                               audit_text: str,
                               regulation_section_id: Optional[int] = None,
                               manual_section_id: Optional[int] = None) -> Dict[str, Any]:
