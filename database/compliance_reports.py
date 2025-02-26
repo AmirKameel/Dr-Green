@@ -2,9 +2,10 @@ from utils.supabase_client import supabase
 
 class ComplianceReports:
     @staticmethod
-    def create_report(regulation_section_id: int, manual_section_id: int, compliance_score: float, report_text: str, metadata: dict = None):
+    def create_report(user_id: str,regulation_section_id: int, manual_section_id: int, compliance_score: float, report_text: str, metadata: dict = None):
         """Insert a new compliance report."""
         data = {
+            "user_id" : user_id
             "regulation_section_id": regulation_section_id,
             "manual_section_id": manual_section_id,
             "compliance_score": compliance_score,
