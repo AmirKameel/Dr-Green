@@ -1479,20 +1479,24 @@ def conduct_audit():
         data = request.json
         
         # Check for required audit input
-        if 'iosa_checklist' not in data or 'input_text' not in data:
+        required_fields = ['iosa_checklist', 'input_text', 'user_id']
+        missing_fields = [field for field in required_fields if field not in data]
+        if missing_fields:
             return jsonify({
-                "error": "Missing required audit input (iosa_checklist and input_text required)"
+                "error": f"Missing required fields: {', '.join(missing_fields)}"
             }), 400
 
-        # Get optional section IDs
+        # Extract data
+        iosa_checklist = data['iosa_checklist']
+        input_text = data['input_text']
+        user_id = data['user_id']
+        
+        # Optional parameters
         regulation_section_id = data.get('regulation_section_id')
         manual_section_id = data.get('manual_section_id')
 
         # Perform the audit
-        audit_result = perform_audit(
-            data['iosa_checklist'],
-            data['input_text']
-        )
+        audit_result = perform_audit(iosa_checklist, input_text, user_id)
 
         # Process and store results
         audit_processor = FlexibleAuditProcessor(
@@ -1504,7 +1508,8 @@ def conduct_audit():
         processing_result = audit_processor.process_and_store_audit(
             audit_text=audit_result,
             regulation_section_id=regulation_section_id,
-            manual_section_id=manual_section_id
+            manual_section_id=manual_section_id,
+            user_id=user_id  # Ensure audit results are associated with the user
         )
 
         # Return comprehensive response
@@ -1522,6 +1527,7 @@ def conduct_audit():
             "error": "Error performing audit",
             "details": str(e)
         }), 500
+
     
 @app.route('/auditv1', methods=['POST'])
 @require_api_key
