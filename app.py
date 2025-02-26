@@ -883,16 +883,16 @@ class FlexibleAuditProcessor:
         self.manual_sections_db = manual_sections_db
 
     def process_and_store_audit(self, user_id: str,
-                              audit_text: str,
-                              regulation_section_id: Optional[int] = None,
-                              manual_section_id: Optional[int] = None) -> Dict[str, Any]:
+                                audit_text: str,
+                                regulation_section_id: Optional[int] = None,
+                                manual_section_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Process audit results and store with flexible section IDs
         """
         try:
             # Parse audit results
             parsed_result = self._parse_audit_result(audit_text)
-            
+
             # Try to identify relevant sections if IDs not provided
             if not regulation_section_id or not manual_section_id:
                 identified_sections = self._identify_relevant_sections(audit_text)
@@ -901,6 +901,7 @@ class FlexibleAuditProcessor:
 
             # Create metadata
             metadata = {
+                "user_id": user_id,  # Include user_id in metadata
                 "timestamp": datetime.utcnow().isoformat(),
                 "findings": parsed_result.get("findings", []),
                 "recommendations": parsed_result.get("recommendations", []),
@@ -912,6 +913,7 @@ class FlexibleAuditProcessor:
 
             # Store report
             report = self.compliance_reports_db.create_report(
+                user_id=user_id,  # Ensure user_id is passed explicitly
                 regulation_section_id=regulation_section_id,
                 manual_section_id=manual_section_id,
                 compliance_score=parsed_result.get("compliance_score", 0.0),
@@ -938,7 +940,6 @@ class FlexibleAuditProcessor:
                 "message": str(e),
                 "partial_results": parsed_result if 'parsed_result' in locals() else None
             }
-
     def _parse_audit_result(self, audit_text: str) -> Dict[str, Any]:
         """
         Enhanced parsing of audit results with confidence scoring
