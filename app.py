@@ -1085,6 +1085,16 @@ from collections import defaultdict
 import time
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+import os
+import re
+import threading
+import fitz  # PyMuPDF
+from collections import defaultdict
+from typing import List, Dict, Optional
+from werkzeug.utils import secure_filename
+from concurrent.futures import ThreadPoolExecutor
+from flask import jsonify, request
+
 class PDFProcessor:
     def __init__(self, chunk_size=10, max_workers=4):
         self.chunk_size = chunk_size
@@ -1119,25 +1129,23 @@ class PDFProcessor:
         line = line.strip()
         if not line:
             return False
-        
+            
         # Check for ECAR style headers
         ecar_pattern = r'^\d+\.\d+\s+[A-Za-z]'
         if re.match(ecar_pattern, line):
             return True
-        
+            
         # IOSA style header check
         header_pattern = r'^(ORG|FLT|DSP|MNT|CAB|GRH|CGO|SEC)\s*(\d+(?:\.\d+)*)$'
         match = re.match(header_pattern, line)
-        
+            
         if not match:
             return False
-
         # Validate page range for IOSA sections
         section_type = match.group(1)
         valid_range = self.page_ranges.get(section_type)
         if not valid_range or not (valid_range[0] <= page_num + 1 <= valid_range[1]):
             return False
-
         # Check for bold text
         blocks = page.get_text("dict")["blocks"]
         for block in blocks:
@@ -1148,182 +1156,298 @@ class PDFProcessor:
                             return True
         return False
 
+    def extract_section_number(self, title):
+        """Extract numeric section from titles like '0.1 PREFACE' or 'ORG 1.1.1'."""
+        match = re.search(r'(?:[A-Z]+\s+)?(\d+(?:\.\d+)*)', title)
+        if match:
+            return match.group(1)
+        return None
+
     def parse_ecar_sections(self, doc):
         """Parse ECAR style documents."""
         sections = []
         current_section = None
         current_text = []
-        
+            
         section_pattern = r'^(\d+\.\d+)\s+(.+)$'
-        
+            
         for page_num in range(len(doc)):
             page = doc.load_page(page_num)
             text = page.get_text()
             lines = text.split('\n')
-            
+                
             for line in lines:
                 line = line.strip()
                 if not line:
                     continue
-                    
+                        
                 match = re.match(section_pattern, line)
                 if match:
+                    section_number = match.group(1)
+                    section_title = line
                     if current_section:
                         sections.append({
                             "section_name": current_section,
                             "section_number": current_section.split()[0],
-                            "full_text": '\n'.join(current_text).strip()
+                            "page_number": page_num,
+                            "full_text": '\n'.join(current_text).strip(),
+                            "level": len(current_section.split()[0].split('.')),
+                            "order_index": len(sections)
                         })
-                    
-                    current_section = line
+                    current_section = section_title
                     current_text = []
                 else:
                     current_text.append(line)
-        
+                    
         # Add final section
         if current_section:
             sections.append({
                 "section_name": current_section,
                 "section_number": current_section.split()[0],
-                "full_text": '\n'.join(current_text).strip()
+                "page_number": page_num,
+                "full_text": '\n'.join(current_text).strip(),
+                "level": len(current_section.split()[0].split('.')),
+                "order_index": len(sections)
             })
-        
+                
         return sections
 
     def extract_section_text(self, doc, start_page, header, expand_pages=8):
         """Extract text for a section with improved boundary detection."""
         section_text = ""
-        
+            
         for i in range(start_page, min(start_page + expand_pages, len(doc))):
             page = doc.load_page(i)
             page_text = page.get_text("text")
             lines = page_text.split('\n')
-            
+                
             for line_index, line in enumerate(lines):
                 if self.is_valid_header(line, page, i) and header not in line:
                     return section_text.strip()
                 section_text += line + "\n"
-                
+                    
         return section_text.strip()
+
+    def build_section_tree(self, sections):
+        """
+        Build a tree based on section numbers.
+        Assigns parent_id based on section number hierarchy.
+        """
+        # Sort sections by section number for proper tree building
+        sections_sorted = sorted(sections, key=lambda x: (
+            x.get("page_number", 0),
+            x.get("section_number", ""),
+            x.get("order_index", 0)
+        ))
+        
+        # Create a dictionary for quick lookup by section number
+        section_dict = {}
+        for section in sections_sorted:
+            if "section_number" in section and section["section_number"]:
+                section_dict[section["section_number"]] = section
+        
+        # Assign parent_id based on section number hierarchy
+        for section in sections_sorted:
+            section["parent_id"] = None
+            if "section_number" not in section or not section["section_number"]:
+                continue
+                
+            section_parts = section["section_number"].split(".")
+            if len(section_parts) <= 1:
+                continue
+                
+            # Try to find parent by removing the last part of the section number
+            potential_parent_number = ".".join(section_parts[:-1])
+            if potential_parent_number in section_dict:
+                section["parent_id"] = section_dict[potential_parent_number].get("id")
+        
+        return sections_sorted
 
     def extract_sections(self, pdf_path: str, expand_pages: int = 8) -> List[Dict]:
         """Extract sections from PDF with support for different document types."""
         try:
             doc = fitz.open(pdf_path)
             sections = []
-            
+                
             # Detect document type
             doc_type = self.detect_document_type(doc)
-            
+                
             if doc_type == 'ecar':
                 sections = self.parse_ecar_sections(doc)
             else:
                 # Process TOC sections
                 toc = doc.get_toc()
                 seen_headers = set()
-                
-                for level, title, page in toc:
+                section_ids = {}  # To track ids for parent-child relationships
+                    
+                for idx, (level, title, page) in enumerate(toc):
+                    section_number = self.extract_section_number(title) or ""
                     section_text = self.extract_section_text(doc, page - 1, title, expand_pages)
-                    sections.append({
+                    
+                    section = {
                         "section_name": title,
-                        "section_number": str(level),
-                        "full_text": section_text
-                    })
+                        "section_number": section_number,
+                        "page_number": page,
+                        "full_text": section_text,
+                        "level": level,
+                        "order_index": idx
+                    }
+                    
+                    # Add unique ID for this section
+                    section["id"] = idx + 1
+                    section_ids[section_number] = section["id"]
+                    
+                    sections.append(section)
                     seen_headers.add(title)
-
+                    
                 # Find additional sections
                 for page_num in range(len(doc)):
                     page = doc.load_page(page_num)
                     page_text = page.get_text("text")
                     lines = page_text.split('\n')
-                    
+                        
                     for line in lines:
                         if self.is_valid_header(line, page, page_num):
                             header = line.strip()
                             if header not in seen_headers:
+                                section_number = self.extract_section_number(header) or ""
                                 section_text = self.extract_section_text(doc, page_num, header, expand_pages)
-                                sections.append({
+                                
+                                section = {
                                     "section_name": header,
-                                    "section_number": str(header.count('.') + 1),
-                                    "full_text": section_text
-                                })
+                                    "section_number": section_number,
+                                    "page_number": page_num + 1,
+                                    "full_text": section_text,
+                                    "level": header.count('.') + 1,
+                                    "order_index": len(sections)
+                                }
+                                
+                                # Add unique ID for this section
+                                section["id"] = len(sections) + 1
+                                section_ids[section_number] = section["id"]
+                                
+                                sections.append(section)
                                 seen_headers.add(header)
-
+                
+                # Now assign parent IDs based on section numbers
+                for section in sections:
+                    section_number = section.get("section_number", "")
+                    if section_number and "." in section_number:
+                        parent_number = ".".join(section_number.split(".")[:-1])
+                        if parent_number in section_ids:
+                            section["parent_id"] = section_ids[parent_number]
+            
+            # Build the section tree to properly assign parent IDs
+            sections = self.build_section_tree(sections)
+            
             doc.close()
             return sections
-
         except Exception as e:
             print(f"Error extracting sections: {str(e)}")
             return []
 
-    # Rest of the class implementation remains unchanged
     def process_sections(self, sections: List[Dict], regulation_id: int) -> Dict:
-        """Process sections in batches with parallel processing"""
+        """Process sections in two passes to handle parent-child relationships"""
         self.total_sections = len(sections)
         self.processed_count = 0
         results = {
-            'successful': [],
-            'failed': [],
-            'total_processed': 0
-        }
-
-        # Process sections in batches
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = []
-            for i in range(0, len(sections), self.chunk_size):
-                batch = sections[i:i + self.chunk_size]
-                future = executor.submit(self._process_batch, batch, regulation_id)
-                futures.append(future)
-
-            # Collect results
-            for future in futures:
-                batch_result = future.result()
-                results['successful'].extend(batch_result['successful'])
-                results['failed'].extend(batch_result['failed'])
-                results['total_processed'] += len(batch_result['successful'])
-
+        'successful': [],
+        'failed': [],
+        'total_processed': 0
+    }
+    
+    # First pass: Create all sections without parent IDs
+        section_id_map = {}  # Maps original section IDs to database IDs
+    
+        for section in sections:
+            try:
+            # Copy section data without parent_id
+                section_data = section.copy()
+                original_id = section_data.pop('id', None) or section_data.get('order_index', 0)
+                section_data.pop('parent_id', None)  # Remove parent_id for now
+            
+            # Process and create section
+                section_data['regulation_id'] = regulation_id
+                created_section = RegulationSections.create_section(**section_data)
+            
+            # Store mapping
+                section_id_map[original_id] = created_section['section_id']
+            
+                results['successful'].append({
+                'section_name': section_data.get('section_name', ''),
+                'section_id': created_section['section_id'],
+                'action': 'created'
+            })
+            except Exception as e:
+                results['failed'].append({
+                'section_name': section.get('section_name', ''),
+                'error': str(e)
+            })
+    
+    # Second pass: Update parent IDs
+        for section in sections:
+            if 'parent_id' in section and section['parent_id'] is not None:
+                original_id = section.get('id', None) or section.get('order_index', 0)
+                if original_id in section_id_map and section['parent_id'] in section_id_map:
+                    section_id = section_id_map[original_id]
+                    parent_id = section_id_map[section['parent_id']]
+                
+                    try:
+                    # Update only the parent_id
+                        RegulationSections.update_section(
+                            section_id=section_id,
+                        data={'parent_section_id': parent_id}
+                    )
+                    except Exception as e:
+                        results['failed'].append({
+                        'section_name': section.get('section_name', ''),
+                        'error': f"Error updating parent ID: {str(e)}"
+                    })
+    
+        results['total_processed'] = len(results['successful'])
         return results
 
     def _process_batch(self, batch: List[Dict], regulation_id: int) -> Dict:
-        """
-        Process a batch of sections with improved duplicate handling
-        """
+        """Process a batch of sections with parent ID handling"""
         batch_results = {
             'successful': [],
             'failed': []
         }
-
+        
         for section_data in batch:
             try:
                 # Process text and generate features
                 full_text = section_data.get('full_text', '')
                 section_name = section_data.get('section_name', '')
-
+                
                 if not full_text or not section_name:
                     raise ValueError("Empty section text or missing section name")
-
+                
                 # Generate features
                 summary = generate_summary(full_text)
                 keywords = extract_keywords(full_text)
                 vector_embedding = generate_vector_embedding(full_text)
-
-                # Prepare section data
+                
+                # Prepare section data with parent_id
                 section_payload = {
                     'regulation_id': regulation_id,
                     'section_name': section_name,
                     'section_number': section_data.get('section_number'),
+                    'parent_section_id': section_data.get('parent_id'),  # Include parent ID
                     'full_text': full_text,
                     'summary': summary,
                     'keywords': keywords,
-                    'vector_embedding': vector_embedding
+                    'vector_embedding': vector_embedding,
+                    'level': section_data.get('level', 1),
+                    'order_index': section_data.get('order_index', 0)
                 }
-
+                
                 # Try to find existing section
                 existing_section = RegulationSections.find_section_by_name(
                     regulation_id=regulation_id,
                     section_name=section_name
                 )
-
+                
                 # Save or update section
                 if existing_section:
                     # Update existing section with merged content
@@ -1339,7 +1463,7 @@ class PDFProcessor:
                     })
                     
                     section = RegulationSections.update_section(
-                        section_id=existing_section['section_id'],  # Use section_id here
+                        section_id=existing_section['section_id'],
                         data=section_payload
                     )
                     action = 'updated'
@@ -1347,23 +1471,22 @@ class PDFProcessor:
                     # Create new section
                     section = RegulationSections.create_section(**section_payload)
                     action = 'created'
-
+                
                 # Validate response
                 if not section or not isinstance(section, dict) or 'section_id' not in section:
                     raise ValueError(f"Invalid section response: {section}")
-
+                    
                 batch_results['successful'].append({
                     'section_name': section_name,
-                    'section_id': section['section_id'],  # Use section_id here
+                    'section_id': section['section_id'],
                     'action': action
                 })
-
+                
                 # Update progress
                 with self._lock:
                     self.processed_count += 1
                     progress = (self.processed_count / self.total_sections) * 100
                     print(f"Progress: {progress:.2f}% ({self.processed_count}/{self.total_sections})")
-
             except Exception as e:
                 error_msg = f"Error processing section {section_name}: {str(e)}"
                 print(error_msg)
@@ -1371,13 +1494,11 @@ class PDFProcessor:
                     'section_name': section_name,
                     'error': error_msg
                 })
-
+        
         return batch_results
 
     def _merge_section_texts(self, existing_text: str, new_text: str) -> str:
-        """
-        Merge existing and new section texts intelligently
-        """
+        """Merge existing and new section texts intelligently"""
         if not existing_text:
             return new_text
         if not new_text:
@@ -1391,6 +1512,8 @@ class PDFProcessor:
         all_paragraphs = sorted(existing_paragraphs.union(new_paragraphs))
         
         return '\n\n'.join(all_paragraphs)
+
+
         
 def perform_audit(iosa_checklist: str, input_text: str, user_id: str) -> str:
     """
@@ -1747,39 +1870,30 @@ def upload_pdf():
             return jsonify({"error": str(e)}), 500
 
 
-# Add this new endpoint to your Flask app
+# Updated Flask routes
 @app.route('/regulations/<int:regulation_id>/upload-document', methods=['POST'])
 def upload_and_process_document(regulation_id):
-    """
-    Upload PDF document and process its sections into the regulation
-    """
+    """Upload PDF document and process its sections into the regulation"""
     if 'file' not in request.files:
         return jsonify({'error': 'No file part'}), 400
-
     file = request.files['file']
     if file.filename == '':
         return jsonify({'error': 'No selected file'}), 400
-
     try:
         # Create upload directory if it doesn't exist
         upload_dir = 'uploads'
         os.makedirs(upload_dir, exist_ok=True)
-
         # Save uploaded file
         filename = secure_filename(file.filename)
         filepath = os.path.join(upload_dir, filename)
         file.save(filepath)
-
         # Initialize processor and extract sections
         processor = PDFProcessor(chunk_size=10, max_workers=4)
         sections = processor.extract_sections(filepath)
-
         # Process and store sections
         results = processor.process_sections(sections, regulation_id)
-
         # Clean up uploaded file
         os.remove(filepath)
-
         return jsonify({
             'message': 'Document processed successfully',
             'total_sections': len(sections),
@@ -1787,20 +1901,15 @@ def upload_and_process_document(regulation_id):
             'failed_sections': len(results['failed']),
             'failures': results['failed']
         }), 200
-
     except Exception as e:
         # Clean up file if it exists
         if 'filepath' in locals() and os.path.exists(filepath):
             os.remove(filepath)
         return jsonify({'error': str(e)}), 500
 
-
-
 @app.route('/manuals/<int:manual_id>/upload-document', methods=['POST'])
 def upload_and_process_manual_document(manual_id):
-    """
-    Upload PDF document and process its sections into the manual
-    """
+    """Upload PDF document and process its sections into the manual"""
     if 'file' not in request.files:
         return jsonify({'error': 'No file part'}), 400
         
@@ -1824,85 +1933,109 @@ def upload_and_process_manual_document(manual_id):
             os.remove(filepath)
             return jsonify({"error": "Manual not found"}), 404
             
-        # Initialize processor and extract sections
+        # Initialize processor and extract sections with hierarchy
         processor = PDFProcessor(chunk_size=10, max_workers=4)
         sections = processor.extract_sections(filepath)
         
-        # Keep track of section names to handle duplicates
-        section_name_counter = defaultdict(int)
+        # Keep track of section IDs for parent-child relationships
+        section_id_map = {}
         successful_sections = []
         failed_sections = []
         
+        # First pass: Create all sections and store their IDs
         for idx, section in enumerate(sections):
             try:
                 # Generate a unique section name
-                base_section_name = section.get('section_name') or f'Section {idx + 1}'
-                section_name_counter[base_section_name] += 1
-                count = section_name_counter[base_section_name]
-                
-                # Add a unique identifier if this name has been used before
-                final_section_name = (
-                    f"{base_section_name} ({count})" if count > 1 else base_section_name
-                )
+                section_name = section.get('section_name') or f'Section {idx + 1}'
                 
                 # Get the full text from the section
                 full_text = section.get('full_text', '').strip()
                 if not full_text:
                     raise ValueError("Empty section content")
-
+                
                 # Generate NLP features
                 try:
                     summary = generate_summary(full_text)
                 except Exception as e:
                     print(f"Error generating summary: {str(e)}")
                     summary = "Summary generation failed"
-
+                    
                 try:
                     keywords = extract_keywords(full_text)
                 except Exception as e:
                     print(f"Error extracting keywords: {str(e)}")
                     keywords = []
-
+                    
                 try:
                     vector_embedding = generate_vector_embedding(full_text)
                 except Exception as e:
                     print(f"Error generating vector embedding: {str(e)}")
                     vector_embedding = None
-
-                # Print debug information
-                print(f"Processing section: {final_section_name}")
-                print(f"Text length: {len(full_text)}")
-                print(f"Keywords count: {len(keywords)}")
-                print(f"Has vector embedding: {vector_embedding is not None}")
                 
-                # Create section in database with proper mapping
+                # Store original section index for updating parent_id later
+                original_index = section.get("id", idx)
+                
+                # Create section in database with None parent_id initially
                 created_section = ManualSections.create_section(
                     manual_id=manual_id,
-                    section_name=final_section_name,
+                    section_name=section_name,
                     section_number=section.get('section_number'),
-                    parent_section_id=None,  # Set this if you have hierarchy information
+                    parent_section_id=None,  # Will update in second pass
                     full_text=full_text,
                     summary=summary,
                     keywords=keywords,
-                    vector_embedding=vector_embedding
+                    vector_embedding=vector_embedding,
+                    level=section.get('level', 1),
+                    order_index=section.get('order_index', idx),
+                    page_number=section.get('page_number')
                 )
                 
+                # Store section ID mapping for parent-child relationships
+                section_id_map[original_index] = created_section.get('id')
+                
                 successful_sections.append({
-                    'section_name': final_section_name,
+                    'section_name': section_name,
                     'id': created_section.get('id'),
                     'text_length': len(full_text),
                     'has_summary': bool(summary),
                     'keywords_count': len(keywords),
-                    'has_embedding': vector_embedding is not None
+                    'has_embedding': vector_embedding is not None,
+                    'original_index': original_index
                 })
                 
             except Exception as section_error:
                 print(f"Error processing section: {str(section_error)}")
                 failed_sections.append({
-                    'section': base_section_name,
+                    'section': section.get('section_name', f'Section {idx + 1}'),
                     'error': str(section_error)
                 })
-                
+        
+        # Second pass: Update parent section IDs
+        for section_info in successful_sections:
+            original_index = section_info.get('original_index')
+            section_id = section_info.get('id')
+            
+            # Find the original section to get parent_id
+            original_section = next((s for s in sections if s.get('id', -1) == original_index), None)
+            if original_section:
+                parent_orig = original_section.get('parent_id')
+                # Only update if parent_orig is a valid integer; otherwise, skip update.
+                try:
+                    # Attempt to convert; if conversion fails, skip update.
+                    key = int(parent_orig)
+                except (ValueError, TypeError):
+                    continue  # Skip this section if parent id is not valid.
+                if key in section_id_map:
+                    parent_id = section_id_map[key]
+                    try:
+                        # Update only if parent_id is valid
+                        ManualSections.update_section(
+                            section_id,
+                            {'parent_section_id': parent_id}
+                        )
+                    except Exception as e:
+                        print(f"Error updating parent relationship for section {original_section.get('section_name', '')}: {str(e)}")
+        
         # Clean up uploaded file
         os.remove(filepath)
         
