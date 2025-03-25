@@ -6,6 +6,9 @@ class RegulationSections:
     def create_section(
         regulation_id: int,
         section_name: str,
+        level: int,
+        page_number: int,
+        order_index: int,
         section_number: str = None,
         parent_section_id: int = None,
         full_text: str = "",
@@ -45,7 +48,10 @@ class RegulationSections:
             "category": category,
             "subcategory": subcategory,
             "vector_embedding": vector_embedding,
-            "original_title" : original_title
+            "original_title" : original_title,
+            "level": level,
+            "order_index": order_index,
+            "page_number": page_number
         }
         response = supabase.table("regulation_sections").insert(data).execute()
         return response.data[0] if response.data else None
@@ -114,14 +120,14 @@ class RegulationSections:
     @staticmethod
     def update_section(section_id: int, data: Dict) -> Dict:
         """
-        Update an existing section
-        """
+    Update an existing section
+    """
         try:
             response = supabase.table('regulation_sections')\
                 .update(data)\
-                .eq('id', section_id)\
+                .eq('section_id', section_id)\
                 .execute()
-            
+        
             if response.data and len(response.data) > 0:
                 return response.data[0]
             raise Exception("Failed to update section")
