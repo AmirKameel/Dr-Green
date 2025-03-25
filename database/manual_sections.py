@@ -1,9 +1,13 @@
 from utils.supabase_client import supabase
+from typing import Dict
 
 class ManualSections:
     @staticmethod
     def create_section(
         manual_id: int,
+        level: int,
+        page_number: int,
+        order_index: int,        
         section_name: str,
         section_number: str = None,
         parent_section_id: int = None,
@@ -23,7 +27,10 @@ class ManualSections:
             "full_text": full_text,
             "summary": summary,
             "keywords": keywords,
-            "vector_embedding": vector_embedding
+            "vector_embedding": vector_embedding,
+            "level": level,
+            "order_index": order_index,
+            "page_number": page_number
         }
         response = supabase.table("manual_sections").insert(data).execute()
         return response.data[0] if response.data else None
@@ -37,12 +44,24 @@ class ManualSections:
         return response.data[0] if response.data else None
 
     @staticmethod
-    def update_section(section_id: int, updates: dict):
+    def update_section(section_id: int, data: Dict) -> Dict:
         """
-        Update a section.
-        """
-        response = supabase.table("manual_sections").update(updates).eq("section_id", section_id).execute()
-        return response.data[0] if response.data else None
+    Update an existing section
+    """
+        try:
+            response = supabase.table('manual_sections')\
+                .update(data)\
+                .eq('section_id', section_id)\
+                .execute()
+        
+            if response.data and len(response.data) > 0:
+                return response.data[0]
+            raise Exception("Failed to update section")
+
+        except Exception as e:
+            print(f"Error updating section: {str(e)}")
+            raise
+
 
     @staticmethod
     def delete_section(section_id: int):
